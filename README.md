@@ -1,10 +1,10 @@
-# Check Point Hardening App — SE Edition
+# Check Point Hardening App - Single Use Public Edition
 
-This is a single-use SE edition of the Check Point Best Practice Scanner. It connects to a Check Point Security Management Server, Multi-Domain Server, or Smart-1 Cloud tenant, gathers Management API evidence, evaluates hardening checks, and can perform only the remediation actions explicitly offered in the interface.
+The Single Use Public Edition connects to a Check Point Security Management Server, Multi-Domain Server, or Smart-1 Cloud tenant, gathers Management API evidence, evaluates hardening checks, and can perform only the remediation actions explicitly offered in the interface.
 
 This project is independent and is not created, endorsed, or supported by Check Point Software Technologies.
 
-## SE privacy model
+## Single Use Public Edition privacy model
 
 - The app does not include a **Mark as Reviewed** control.
 - The app does not keep an audit trail or per-check history of remediation changes.
@@ -53,8 +53,8 @@ Remediation actions change the connected Check Point environment and require exp
 Build and run with Docker:
 
 ```sh
-docker build -f Docker/Dockerfile -t check-point-hardening-app-se .
-docker run --rm -p 127.0.0.1:3100:3100 check-point-hardening-app-se
+docker build -f Docker/Dockerfile -t check-point-hardening-app-single-use-public-edition .
+docker run --rm -p 127.0.0.1:3100:3100 check-point-hardening-app-single-use-public-edition
 ```
 
 Or use Compose:

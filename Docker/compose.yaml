@@ -3,8 +3,8 @@ services:
     build:
       context: ..
       dockerfile: Docker/Dockerfile
-    image: check-point-hardening-app-se:latest
-    container_name: check-point-hardening-app-se
+    image: check-point-hardening-app-single-use-public-edition:latest
+    container_name: check-point-hardening-app-single-use-public-edition
     init: true
     restart: unless-stopped
     shm_size: "1gb"

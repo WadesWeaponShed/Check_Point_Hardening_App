@@ -395,7 +395,7 @@ function renderHtml(scan, pageSize) {
   </style>
 </head>
 <body>
-  <h1 class="report-title">Check Point Best Practices Hardening Review</h1>
+  <h1 class="report-title">Check Point Hardening App - Single Use Public Edition</h1>
   <p class="report-meta">Scanned: ${escapeHtml(formatDate(scan.scannedAt))}</p>
   <div class="summary-grid">
     ${renderSummaryCard({ count: checks.length, label: "Checks", checks, emptyText: "No checks returned" })}

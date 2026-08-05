@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE_NAME="${IMAGE_NAME:-check-point-hardening-app-se}"
+IMAGE_NAME="${IMAGE_NAME:-check-point-hardening-app-single-use-public-edition}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist}"
@@ -32,7 +32,7 @@ Docker image bundle created:
 
 On the receiving machine:
   gunzip -c "$(basename "${ARCHIVE_PATH}")" | docker load
-  docker run -d --name check-point-hardening-app-se --init --restart unless-stopped --shm-size=1g -p 3100:3100 ${IMAGE_NAME}:${IMAGE_TAG}
+  docker run -d --name check-point-hardening-app-single-use-public-edition --init --restart unless-stopped --shm-size=1g -p 3100:3100 ${IMAGE_NAME}:${IMAGE_TAG}
 
 Open:
   http://127.0.0.1:3100

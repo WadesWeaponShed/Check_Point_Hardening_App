@@ -1,8 +1,8 @@
 {
-  "name": "check-point-hardening-app-se",
+  "name": "check-point-hardening-app-single-use-public-edition",
   "version": "0.1.0",
   "private": true,
-  "description": "Single-use SE hardening scanner for Check Point environments.",
+  "description": "Single Use Public Edition hardening scanner for Check Point environments.",
   "type": "module",
   "scripts": {
     "start": "node server.js",

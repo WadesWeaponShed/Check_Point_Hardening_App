@@ -9645,5 +9645,5 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  log("Check Point Best Practice Scanner listening", { url: `http://${HOST}:${PORT}` });
+  log("Check Point Hardening App - Single Use Public Edition listening", { url: `http://${HOST}:${PORT}` });
 });
