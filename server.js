@@ -2016,9 +2016,11 @@ function licenseFeatureEnabledState(feature, gateway = {}) {
     return "Please Confirm Config Manually in Assigned Threat Profile";
   }
   const bladeKey = LICENSE_FEATURE_BLADE_KEYS.get(code);
-  if (!bladeKey) return "Disabled";
+  if (!bladeKey) return { value: "Disabled", tone: "critical" };
   const blades = gateway["network-security-blades"] || gateway.networkSecurityBlades || {};
-  return blades[bladeKey] === true ? "Enabled" : "Disabled";
+  return blades[bladeKey] === true
+    ? { value: "Enabled", tone: "success" }
+    : { value: "Disabled", tone: "critical" };
 }
 
 function parseLicenseStatusFeatures(output) {

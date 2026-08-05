@@ -982,7 +982,8 @@ function renderEvidenceCell(row, column, checkId = "") {
     `;
   }
   if (rawValue && typeof rawValue === "object" && (rawValue._tone || rawValue.tone)) {
-    const toneClass = (rawValue._tone || rawValue.tone) === "critical" ? "critical-detail" : "";
+    const tone = rawValue._tone || rawValue.tone;
+    const toneClass = tone === "critical" ? "critical-detail" : (tone === "success" ? "positive-detail" : "");
     if (rawValue.multiline) {
       const criticalLines = new Set((rawValue.criticalLines || []).map(String));
       const sourceLines = String(rawValue.label || rawValue.value || "").split(/\r?\n/);

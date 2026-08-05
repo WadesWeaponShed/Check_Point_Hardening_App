@@ -1305,6 +1305,12 @@ summary {
   font-weight: 900;
 }
 
+.evidence-table td.positive-detail,
+.evidence-table .positive-detail {
+  color: var(--ok);
+  font-weight: 900;
+}
+
 .detail-warning {
   margin-top: 6px;
 }

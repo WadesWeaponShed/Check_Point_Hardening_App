@@ -130,7 +130,8 @@ function richText(value, context = {}) {
       return `<a class="report-link-button" href="${escapeAttr(link.url)}">${escapeHtml(link.label || link.url)}</a>`;
     }
     const text = cleanText(value.label ?? value.value ?? "");
-    const toneClass = (value._tone || value.tone) === "critical" ? " critical-detail" : "";
+    const tone = value._tone || value.tone;
+    const toneClass = tone === "critical" ? " critical-detail" : (tone === "success" ? " positive-detail" : "");
     if (value.multiline || text.includes("\n")) {
       const criticalLines = new Set((value.criticalLines || []).map(String));
       const lines = text.split(/\n/);
@@ -374,6 +375,7 @@ function renderHtml(scan, pageSize) {
     .detail-bullets { margin: 4px 0 0 15px; padding: 0; }
     .detail-bullets li + li { margin-top: 2px; }
     .critical-detail { color: #b42323 !important; font-weight: 900 !important; }
+    .positive-detail { color: #18794e !important; font-weight: 900 !important; }
     .warning-block { grid-column: 2; margin: -2px 0 3px; }
     .evidence-section { margin-top: 8px; break-inside: auto; }
     .evidence-section h5 { margin: 9px 0 5px; color: #000000; font-size: 12px; font-weight: 900; }
