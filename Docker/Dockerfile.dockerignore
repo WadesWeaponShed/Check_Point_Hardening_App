@@ -1,0 +1,10 @@
+.git
+.gitignore
+.DS_Store
+node_modules
+npm-debug.log*
+output
+dist
+*.log
+*.tmp
+check-point-debug-log-*.json

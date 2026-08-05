@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+dist/
+output/
+*.log
+*.tmp
+*.pyc
+__pycache__/
+.env
+.env.*
+!.env.example
+check-point-debug-log-*.json
+check-point-best-practices-hardening-report*.pdf

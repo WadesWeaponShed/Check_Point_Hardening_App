@@ -1,0 +1,16 @@
+services:
+  scanner:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile
+    image: check-point-hardening-app-se:latest
+    container_name: check-point-hardening-app-se
+    init: true
+    restart: unless-stopped
+    shm_size: "1gb"
+    ports:
+      - "3100:3100"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      NODE_ENV: "production"

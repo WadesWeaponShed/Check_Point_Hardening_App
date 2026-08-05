@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Check Point Best Practice Scanner</title>
+    <link rel="stylesheet" href="/styles.css?v=20260805-centered-actions">
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel login-panel" id="loginPanel">
+        <div>
+          <h1 class="title-stack">
+            <span>Check Point Best Practices</span>
+            <span>Hardening Review</span>
+          </h1>
+          <p class="lede">Scan a Check Point Management Server and it's managed Gateways for hardening-guide signals and collect evidence for settings that need review or remediation.</p>
+          <p class="lede">This tool is not created or supported by Check Point. Most checks are review-only, and any remediation action requires explicit operator approval.</p>
+          <div id="backendStatus" class="status-card disconnected" role="status">Checking local backend...</div>
+          <dl id="loginDiagnostics" class="diagnostics hidden"></dl>
+        </div>
+
+        <form id="loginForm" class="grid-form">
+          <label class="full-row">
+            Management Host Type
+            <select id="managementType" name="managementType">
+              <option value="sms" selected>Security Management Server (SMS)</option>
+              <option value="smart1-cloud">Smart-1 Cloud</option>
+              <option value="mds">Multi-Domain Server (MDS)</option>
+            </select>
+          </label>
+          <label class="full-row">
+            Management Host
+            <input id="host" name="host" placeholder="mgmt.example.com" required autocomplete="off">
+          </label>
+          <label>
+            Port
+            <input id="port" name="port" placeholder="443" inputmode="numeric">
+          </label>
+          <label id="usernameField" class="full-row">
+            Username
+            <input id="username" name="username" required autocomplete="username">
+          </label>
+          <fieldset class="auth-mode">
+            <legend>Authentication</legend>
+            <label>
+              <input type="radio" name="authMode" value="password" checked>
+              Password
+            </label>
+            <label>
+              <input type="radio" name="authMode" value="api-key">
+              API Key
+            </label>
+          </fieldset>
+          <label id="passwordField" class="full-row">
+            Password
+            <input id="password" name="password" type="password" required autocomplete="current-password">
+          </label>
+          <label id="apiKeyField" class="full-row hidden">
+            API Key
+            <input id="apiKey" name="apiKey" type="password" autocomplete="off">
+          </label>
+          <input id="smart1Cloud" name="smart1Cloud" type="checkbox" class="hidden" tabindex="-1" aria-hidden="true">
+          <input id="mdsScan" name="mdsScan" type="checkbox" class="hidden" tabindex="-1" aria-hidden="true">
+          <label id="domainField" class="full-row mds-field hidden">
+            Domain
+            <input id="domain" name="domain" placeholder="CMA/domain name or IP">
+          </label>
+          <label id="managementObjectField" class="full-row mds-field hidden">
+            Global MDS Object Name
+            <input id="managementObjectName" name="managementObjectName" placeholder="Required for MDS Gaia run-script checks">
+          </label>
+          <label class="check-row full-row">
+            <input id="ignoreTls" name="ignoreTls" type="checkbox" checked>
+            Allow self-signed certificate
+          </label>
+          <label class="check-row large-env-row full-row">
+            <input id="largeEnvironmentMode" name="largeEnvironmentMode" type="checkbox">
+            Large environment mode
+            <span>Lower scan concurrency for large MDS / many-gateway environments.</span>
+          </label>
+          <div id="loginStatus" class="status-card disconnected" role="status">Not connected.</div>
+          <button class="primary" type="submit">Log in</button>
+        </form>
+      </section>
+
+      <section class="workspace hidden" id="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="connectionLabel">Not connected</p>
+            <h1 class="title-stack compact">
+              <span>Check Point Best Practice Scanner</span>
+              <span>Hardening Review</span>
+            </h1>
+            <p class="topbar-description">Checks are aligned to the Check Point Gateway and Management Hardening Administration Guide. Some controls can be inspected through Management API evidence; others are marked for manual validation when they depend on network design, Gaia Portal, Gaia API, SSH/Clish, identity provider settings, or out-of-band management.</p>
+          </div>
+          <div class="actions">
+            <button id="scanButton" class="primary">Scan Hardening Posture</button>
+            <button id="exportPdfButton" type="button" disabled>Export PDF</button>
+            <button id="logoutButton">Log out</button>
+          </div>
+        </header>
+
+        <section class="panel guide-panel">
+          <div>
+            <h2>Hardening Guide Baseline</h2>
+            <p id="guideSummary">Run a scan to load guide-aligned checks.</p>
+          </div>
+          <a class="guide-link" href="https://sc1.checkpoint.com/documents/Check_Point_Gateway_and_Management_Hardening/CP_Check_Point_Gateway_and_Management_Hardening.pdf" target="_blank" rel="noreferrer">Open guide</a>
+        </section>
+
+        <section class="summary-grid" id="summaryGrid" aria-live="polite">
+          <div class="summary-card">
+            <span class="summary-value">0</span>
+            <span class="summary-label">Review Recommended</span>
+          </div>
+          <div class="summary-card">
+            <span class="summary-value">0</span>
+            <span class="summary-label">Manual</span>
+          </div>
+          <div class="summary-card">
+            <span class="summary-value">0</span>
+            <span class="summary-label">Unknown</span>
+          </div>
+          <div class="summary-card">
+            <span class="summary-value">0</span>
+            <span class="summary-label">Pass</span>
+          </div>
+        </section>
+
+        <section class="panel" id="hardeningChecksPanel">
+          <div class="table-head">
+            <div>
+              <h2>Hardening Checks</h2>
+              <p>Review each result and expand evidence where available. Manual checks are included so the guide can serve as a single checklist, even when the Management API cannot prove the setting.</p>
+            </div>
+          </div>
+
+          <div id="scanStatus" class="global-status empty-state">Run a scan to see hardening checks.</div>
+          <div id="checksList" class="checks-list"></div>
+        </section>
+
+        <section class="panel hidden api-collection-panel" id="commandPanel">
+          <details class="api-collection-details">
+            <summary class="api-collection-summary">
+              <div>
+                <h2>API Collection</h2>
+                <p>Shows which Management API collection commands were accepted by the connected server.</p>
+              </div>
+            </summary>
+            <div id="commandResults" class="command-results"></div>
+            <div class="debug-log-actions">
+              <button id="downloadDebugLogButton" type="button">Download Debug Log</button>
+            </div>
+          </details>
+        </section>
+
+        <section class="log" id="log" aria-live="polite"></section>
+      </section>
+    </main>
+    <div id="popupOverlay" class="popup-overlay hidden" role="presentation">
+      <section class="popup-dialog" role="alertdialog" aria-modal="true" aria-labelledby="popupTitle" aria-describedby="popupMessage">
+        <div class="popup-head">
+          <h2 id="popupTitle">Remediation Failed</h2>
+          <button id="popupCloseIcon" class="popup-close" type="button" aria-label="Close">x</button>
+        </div>
+        <div id="popupMessage" class="popup-message"></div>
+        <div class="popup-actions">
+          <button id="popupCloseButton" class="primary" type="button">OK</button>
+        </div>
+      </section>
+    </div>
+    <div id="reauthOverlay" class="popup-overlay hidden" role="presentation">
+      <section class="popup-dialog reauth-dialog" role="dialog" aria-modal="true" aria-labelledby="reauthTitle" aria-describedby="reauthMessage">
+        <div class="popup-head">
+          <h2 id="reauthTitle">Session Expired</h2>
+        </div>
+        <p id="reauthMessage" class="popup-message">Your Check Point API session is no longer active. Log in again to continue the action you were performing.</p>
+        <form id="reauthForm" class="reauth-form">
+          <label>
+            Management host
+            <input id="reauthHost" name="host" required autocomplete="off">
+          </label>
+          <label>
+            Port
+            <input id="reauthPort" name="port" placeholder="443" inputmode="numeric">
+          </label>
+          <fieldset class="auth-mode">
+            <legend>Authentication</legend>
+            <label>
+              <input type="radio" name="authMode" value="password" checked>
+              Password
+            </label>
+            <label>
+              <input type="radio" name="authMode" value="api-key">
+              API Key
+            </label>
+          </fieldset>
+          <label id="reauthUsernameField">
+            Username
+            <input id="reauthUsername" name="username" required autocomplete="username">
+          </label>
+          <label id="reauthPasswordField">
+            Password
+            <input id="reauthPassword" name="password" type="password" required autocomplete="current-password">
+          </label>
+          <label id="reauthApiKeyField" class="hidden">
+            API Key
+            <input id="reauthApiKey" name="apiKey" type="password" autocomplete="off">
+          </label>
+          <label class="check-row">
+            <input id="reauthSmart1Cloud" name="smart1Cloud" type="checkbox">
+            Smart-1 Cloud context URL
+          </label>
+          <label class="check-row">
+            <input id="reauthMdsScan" name="mdsScan" type="checkbox">
+            MDS Scan
+          </label>
+          <label id="reauthDomainField" class="mds-field hidden">
+            Domain
+            <input id="reauthDomain" name="domain" placeholder="CMA/domain name or IP">
+          </label>
+          <label id="reauthManagementObjectField" class="mds-field hidden">
+            Global MDS Object Name
+            <input id="reauthManagementObjectName" name="managementObjectName" placeholder="Required for MDS Gaia run-script checks">
+          </label>
+          <label class="check-row">
+            <input id="reauthIgnoreTls" name="ignoreTls" type="checkbox" checked>
+            Allow self-signed certificate
+          </label>
+          <label class="check-row large-env-row">
+            <input id="reauthLargeEnvironmentMode" name="largeEnvironmentMode" type="checkbox">
+            Large environment mode
+            <span>Lower scan concurrency for large MDS / many-gateway environments.</span>
+          </label>
+          <div id="reauthStatus" class="status-card disconnected" role="status">Waiting for login.</div>
+          <div class="popup-actions reauth-actions">
+            <button id="reauthCancelButton" type="button">Cancel</button>
+            <button class="primary" type="submit">Reconnect and Continue</button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <script src="/app.js?v=20260729-login-host-type"></script>
+  </body>
+</html>
