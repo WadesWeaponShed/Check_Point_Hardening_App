@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
