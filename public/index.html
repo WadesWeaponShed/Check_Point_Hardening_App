@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Check Point Hardening App - Single Use Public Edition</title>
-    <link rel="stylesheet" href="/styles.css?v=20260805-guide-link">
+    <link rel="stylesheet" href="/styles.css?v=20260808-mora-mode">
   </head>
   <body>
     <main class="app">
@@ -21,6 +21,10 @@
         </div>
 
         <form id="loginForm" class="grid-form">
+          <div id="moraModeBanner" class="mora-mode-banner full-row hidden" role="status">
+            <strong>Welcome to Mor-a Mode</strong>
+            <span>MDS discovery will scan every active domain sequentially. The Domain field is not required.</span>
+          </div>
           <label class="full-row">
             Management Host Type
             <select id="managementType" name="managementType">
@@ -241,6 +245,6 @@
         </form>
       </section>
     </div>
-    <script src="/app.js?v=20260729-login-host-type"></script>
+    <script src="/app.js?v=20260808-mora-mode"></script>
   </body>
 </html>

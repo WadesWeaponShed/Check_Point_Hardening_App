@@ -2,10 +2,15 @@ let sessionId = "";
 let hardeningScan = null;
 const openCheckGroups = new Set();
 const openCheckItems = new Set();
+const openMoraDomains = new Set();
+const KONAMI_SEQUENCE = ["ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "b", "a"];
+let konamiPosition = 0;
+let moraModeEnabled = false;
 
 const loginPanel = document.querySelector("#loginPanel");
 const workspace = document.querySelector("#workspace");
 const loginForm = document.querySelector("#loginForm");
+const moraModeBanner = document.querySelector("#moraModeBanner");
 const managementTypeInput = document.querySelector("#managementType");
 const hostInput = document.querySelector("#host");
 const usernameField = document.querySelector("#usernameField");
@@ -117,6 +122,9 @@ function renderScanProgress(progress = {}) {
   const steps = Array.isArray(progress.steps) ? progress.steps.slice(-9) : [];
   const currentStep = progress.currentStep || "Scanning hardening posture";
   const percent = Number(progress.percent || 0);
+  const domainProgress = Number(progress.totalDomains || 0)
+    ? `Domain ${progress.currentDomainIndex || 0} of ${progress.totalDomains}${progress.currentDomain ? `: ${progress.currentDomain}` : ""}`
+    : "";
   const stepMarkup = steps.length
     ? steps.map((step) => `
       <div class="scan-step ${step.status === "ok" ? "done" : "failed"}">
@@ -132,8 +140,8 @@ function renderScanProgress(progress = {}) {
   scanStatus.innerHTML = `
     <div class="scan-progress-head">
       ${progress.failed ? "" : '<span class="spinner" aria-hidden="true"></span>'}
-      <strong>${escapeHtml(progress.failed ? "Scan failed" : progress.complete ? "Scan complete" : "Scanning hardening posture...")}</strong>
-      <span>${escapeHtml(`${progress.completedSteps || 0} command${Number(progress.completedSteps || 0) === 1 ? "" : "s"} completed`)}</span>
+      <strong>${escapeHtml(progress.failed ? "Scan failed" : progress.complete ? "Scan complete" : domainProgress ? "Scanning Mor-a Mode domains..." : "Scanning hardening posture...")}</strong>
+      <span>${escapeHtml(`${domainProgress ? `${domainProgress} - ` : ""}${progress.completedSteps || 0} command${Number(progress.completedSteps || 0) === 1 ? "" : "s"} completed`)}</span>
     </div>
     <div class="scan-progress-meter" aria-label="Scan progress">
       <span style="width: ${Math.max(3, Math.min(100, percent))}%"></span>
@@ -306,18 +314,37 @@ function updateAuthMode() {
   }
 }
 
+function enableMoraMode() {
+  if (moraModeEnabled) return;
+  moraModeEnabled = true;
+  managementTypeInput.value = "mds";
+  mdsScanInput.checked = true;
+  smart1CloudInput.checked = false;
+  domainInput.value = "";
+  moraModeBanner.classList.remove("hidden");
+  document.body.classList.add("mora-mode");
+  updateManagementType();
+  showHtmlPopup("Welcome to Mor-a Mode", `
+    <div class="popup-guide">
+      <p>Mor-a Mode is ready for MDS. Log in without selecting a domain and the app will discover active domains, scan them sequentially, and prepare one PDF report per domain.</p>
+      <p>This mode is scan-and-report only. Cross-domain remediation controls are intentionally hidden.</p>
+    </div>
+  `);
+}
+
 function updateManagementType() {
   const managementType = managementTypeInput.value || "sms";
   const isMds = managementType === "mds";
   const isSmart1Cloud = managementType === "smart1-cloud";
+  const useMoraMode = moraModeEnabled && isMds;
   mdsScanInput.checked = isMds;
   smart1CloudInput.checked = isSmart1Cloud;
   hostInput.placeholder = isSmart1Cloud
     ? "tenant.example.maas.checkpoint.com/context/web_api"
     : "Hostname or IP Address";
-  domainField.classList.toggle("hidden", !isMds);
+  domainField.classList.toggle("hidden", !isMds || useMoraMode);
   managementObjectField.classList.toggle("hidden", !isMds);
-  domainInput.required = isMds;
+  domainInput.required = isMds && !useMoraMode;
   managementObjectNameInput.required = isMds;
   if (!isMds) {
     domainInput.value = "";
@@ -355,9 +382,9 @@ function updateReauthMode() {
 
 function updateReauthMdsMode() {
   const enabled = reauthMdsScanInput.checked;
-  reauthDomainField.classList.toggle("hidden", !enabled);
+  reauthDomainField.classList.toggle("hidden", !enabled || moraModeEnabled);
   reauthManagementObjectField.classList.toggle("hidden", !enabled);
-  reauthDomainInput.required = enabled;
+  reauthDomainInput.required = enabled && !moraModeEnabled;
   reauthManagementObjectNameInput.required = enabled;
   if (!enabled) {
     reauthDomainInput.value = "";
@@ -697,7 +724,7 @@ function renderGroupBadges(checks = []) {
 }
 
 function renderRemediation(check) {
-  if (!check.remediation?.action) {
+  if (hardeningScan?.moraMode || !check.remediation?.action) {
     return "";
   }
   if (
@@ -733,6 +760,9 @@ function renderReviewAction(check) {
 }
 
 function renderCheckActions(check) {
+  if (hardeningScan?.moraMode) {
+    return "";
+  }
   const actions = [];
   if (check.id === "mgmt.trusted-clients") {
     actions.push(`
@@ -871,9 +901,10 @@ function renderEvidenceTable(table, checkId = "") {
   if (!table?.columns?.length || !table?.rows?.length) {
     return "";
   }
-  const columns = table.selectable ? ["Select", ...table.columns] : table.columns;
+  const selectable = Boolean(table.selectable) && !hardeningScan?.moraMode;
+  const columns = selectable ? ["Select", ...table.columns] : table.columns;
   const tableClass = table.compact ? "evidence-table evidence-table--compact" : "evidence-table";
-  const targetSelection = table.targetSelection?.value ? `
+  const targetSelection = table.targetSelection?.value && !hardeningScan?.moraMode ? `
     <label class="evidence-target-selection">
       <input
         class="evidence-target-checkbox"
@@ -910,7 +941,7 @@ function renderEvidenceTables(tables = [], checkId = "") {
   if (!Array.isArray(tables) || !tables.length) {
     return "";
   }
-  const hasTargetSelection = tables.some((table) => table.targetSelection?.value);
+  const hasTargetSelection = !hardeningScan?.moraMode && tables.some((table) => table.targetSelection?.value);
   const selectAll = checkId === "gaia.allowed-host-access" && hasTargetSelection ? `
     <label class="evidence-target-select-all">
       <input
@@ -1007,7 +1038,7 @@ function renderEvidenceCell(row, column, checkId = "") {
     return `<td>${lines}</td>`;
   }
   const value = escapeHtml(rawValue && typeof rawValue === "object" ? "" : rawValue || "");
-  const remediation = row._remediation;
+  const remediation = hardeningScan?.moraMode ? null : row._remediation;
   const remediationColumn = row._remediationColumn || (column === "Description" ? "Description" : "State");
   if (column !== remediationColumn || !remediation?.action) {
     return `<td>${value}</td>`;
@@ -1165,47 +1196,8 @@ function downloadDebugLog() {
   addNotice("Debug log downloaded.", "success");
 }
 
-function renderChecks() {
-  if (!hardeningScan) {
-    scanStatus.className = "global-status empty-state";
-    scanStatus.textContent = "Run a scan to see hardening checks.";
-    checksList.innerHTML = "";
-    commandPanel.classList.add("hidden");
-    downloadDebugLogButton.disabled = true;
-    exportPdfButton.disabled = true;
-    renderSummary({});
-    return;
-  }
-  exportPdfButton.disabled = false;
-  downloadDebugLogButton.disabled = false;
-
-  const checks = hardeningScan.checks || [];
-  const scanned = hardeningScan.scannedAt ? new Date(hardeningScan.scannedAt).toLocaleString() : "";
-  const lastScan = hardeningScan.history?.lastScan;
-  const lastScanText = lastScan?.scannedAt
-    ? `${new Date(lastScan.scannedAt).toLocaleString()} by ${lastScan.user || "Unknown"}`
-    : "No previous scan recorded";
-  const guide = hardeningScan.guide || {};
-  guideSummary.innerHTML = `
-    ${escapeHtml(guide.title || "Check Point Gateway and Management Hardening Administration Guide")}
-    ${guide.date ? `<span>Published ${escapeHtml(guide.date)}</span>` : ""}
-  `;
-  scanStatus.className = "global-status";
-  scanStatus.innerHTML = `
-    <dl>${renderDetails({
-      "Checks": checks.length,
-      "Remediation recommended": Number(hardeningScan.summary?.["remediation-required"] || 0) + Number(hardeningScan.summary?.["remediation-recommended"] || 0),
-      "Review recommended": Number(hardeningScan.summary?.["needs-review"] || 0) + Number(hardeningScan.summary?.["remediation-review-recommended"] || 0),
-      "Manual validation": hardeningScan.summary?.manual || 0,
-      "Unknown": hardeningScan.summary?.unknown || 0,
-      "Passed": hardeningScan.summary?.pass || 0,
-      "Scanned": scanned,
-      "Last Scan": lastScanText
-    })}</dl>
-  `;
-  renderSummary(hardeningScan.summary || {});
-
-  checksList.innerHTML = groupChecks(checks).map(([category, categoryChecks]) => `
+function renderCheckGroupsMarkup(checks = []) {
+  return groupChecks(checks).map(([category, categoryChecks]) => `
     <details class="check-group" data-category="${escapeHtml(category)}" ${openCheckGroups.has(category) ? "open" : ""}>
       <summary class="check-group-summary">
         <span class="check-group-title">${escapeHtml(category)}</span>
@@ -1249,6 +1241,68 @@ function renderChecks() {
       </div>
     </details>
   `).join("");
+}
+
+function renderChecks() {
+  if (!hardeningScan) {
+    scanStatus.className = "global-status empty-state";
+    scanStatus.textContent = "Run a scan to see hardening checks.";
+    checksList.innerHTML = "";
+    commandPanel.classList.add("hidden");
+    downloadDebugLogButton.disabled = true;
+    exportPdfButton.disabled = true;
+    renderSummary({});
+    return;
+  }
+  exportPdfButton.disabled = false;
+  downloadDebugLogButton.disabled = false;
+
+  const moraDomains = hardeningScan.moraMode && Array.isArray(hardeningScan.domains) ? hardeningScan.domains : [];
+  const checks = moraDomains.length
+    ? moraDomains.flatMap((domain) => domain.scan?.checks || [])
+    : (hardeningScan.checks || []);
+  const scanned = hardeningScan.scannedAt ? new Date(hardeningScan.scannedAt).toLocaleString() : "";
+  const lastScan = hardeningScan.history?.lastScan;
+  const lastScanText = lastScan?.scannedAt
+    ? `${new Date(lastScan.scannedAt).toLocaleString()} by ${lastScan.user || "Unknown"}`
+    : "No previous scan recorded";
+  const guide = hardeningScan.guide || {};
+  guideSummary.innerHTML = `
+    ${escapeHtml(guide.title || "Check Point Gateway and Management Hardening Administration Guide")}
+    ${guide.date ? `<span>Published ${escapeHtml(guide.date)}</span>` : ""}
+  `;
+  scanStatus.className = "global-status";
+  scanStatus.innerHTML = `
+    <dl>${renderDetails({
+      "Checks": checks.length,
+      ...(hardeningScan.moraMode ? {
+        "Domains scanned": moraDomains.filter((domain) => domain.scan).length,
+        "Domains failed": moraDomains.filter((domain) => !domain.scan).length
+      } : {}),
+      "Remediation recommended": Number(hardeningScan.summary?.["remediation-required"] || 0) + Number(hardeningScan.summary?.["remediation-recommended"] || 0),
+      "Review recommended": Number(hardeningScan.summary?.["needs-review"] || 0) + Number(hardeningScan.summary?.["remediation-review-recommended"] || 0),
+      "Manual validation": hardeningScan.summary?.manual || 0,
+      "Unknown": hardeningScan.summary?.unknown || 0,
+      "Passed": hardeningScan.summary?.pass || 0,
+      "Scanned": scanned,
+      ...(hardeningScan.moraMode ? {} : { "Last Scan": lastScanText })
+    })}</dl>
+  `;
+  renderSummary(hardeningScan.summary || {});
+
+  checksList.innerHTML = hardeningScan.moraMode
+    ? moraDomains.map((domain, index) => `
+      <details class="mora-domain-group" data-domain-name="${escapeHtml(domain.name)}" ${openMoraDomains.has(domain.name) || index === 0 ? "open" : ""}>
+        <summary class="mora-domain-summary">
+          ${escapeHtml(domain.name)}
+          <span>${domain.scan ? `${domain.scan.checks?.length || 0} checks` : "Scan failed"}</span>
+        </summary>
+        <div class="mora-domain-content">
+          ${domain.scan ? renderCheckGroupsMarkup(domain.scan.checks || []) : `<p class="mora-domain-error">${escapeHtml(domain.error || "This domain could not be scanned.")}</p>`}
+        </div>
+      </details>
+    `).join("")
+    : renderCheckGroupsMarkup(checks);
 
   const results = hardeningScan.commandResults || {};
   const commandLog = hardeningScan.commandLog || [];
@@ -1302,6 +1356,17 @@ function renderChecks() {
         openCheckGroups.add(category);
       } else {
         openCheckGroups.delete(category);
+      }
+    });
+  });
+  document.querySelectorAll(".mora-domain-group").forEach((group) => {
+    group.addEventListener("toggle", () => {
+      const name = group.dataset.domainName;
+      if (!name) return;
+      if (group.open) {
+        openMoraDomains.add(name);
+      } else {
+        openMoraDomains.delete(name);
       }
     });
   });
@@ -1414,12 +1479,16 @@ async function exportHardeningChecksPdf() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "check-point-best-practices-hardening-report.pdf";
+    link.download = hardeningScan.moraMode
+      ? "mora-mode-domain-hardening-reports.zip"
+      : "check-point-best-practices-hardening-report.pdf";
     document.body.append(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    addNotice("PDF report exported with cover and intro.", "success");
+    addNotice(hardeningScan.moraMode
+      ? "Separate domain PDF reports exported in one ZIP file."
+      : "PDF report exported with cover and intro.", "success");
   } catch (error) {
     addNotice(`PDF export failed: ${error.message}`, "error");
   } finally {
@@ -1955,6 +2024,16 @@ popupOverlay.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === KONAMI_SEQUENCE[konamiPosition]) {
+    konamiPosition += 1;
+    if (konamiPosition === KONAMI_SEQUENCE.length) {
+      konamiPosition = 0;
+      enableMoraMode();
+    }
+  } else {
+    konamiPosition = key === KONAMI_SEQUENCE[0] ? 1 : 0;
+  }
   if (event.key === "Escape" && !popupOverlay.classList.contains("hidden")) {
     hidePopup();
   }
@@ -1969,6 +2048,7 @@ loginForm.addEventListener("submit", async (event) => {
     const form = new FormData(loginForm);
     const authMode = form.get("authMode") || "password";
     const mdsScan = form.get("mdsScan") === "on";
+    const moraMode = moraModeEnabled && mdsScan;
     const result = await api("/api/login", {
       host: form.get("host"),
       port: form.get("port"),
@@ -1978,14 +2058,16 @@ loginForm.addEventListener("submit", async (event) => {
       apiKey: form.get("apiKey"),
       smart1Cloud: form.get("smart1Cloud") === "on",
       mdsScan,
-      domain: mdsScan ? form.get("domain") : "",
+      moraMode,
+      domain: mdsScan && !moraMode ? form.get("domain") : "",
       managementObjectName: mdsScan ? form.get("managementObjectName") : "",
       ignoreTls: form.get("ignoreTls") === "on",
       largeEnvironmentMode: form.get("largeEnvironmentMode") === "on"
     });
     sessionId = result.sessionId;
-    connectionLabel.textContent = `Connected to ${result.baseUrl} as ${result.user}`;
-    setLoginStatus(`Connected to ${result.baseUrl} as ${result.user}.`, "connected");
+    const modeLabel = result.moraMode ? ` in Mor-a Mode (${result.domains?.filter((domain) => domain.available).length || 0} active domains ready)` : "";
+    connectionLabel.textContent = `Connected to ${result.baseUrl} as ${result.user}${modeLabel}`;
+    setLoginStatus(`Connected to ${result.baseUrl} as ${result.user}${modeLabel}.`, "connected");
     setDiagnostics({
       "Request ID": result.requestId,
       "Check Point target": result.baseUrl,
@@ -1993,7 +2075,7 @@ loginForm.addEventListener("submit", async (event) => {
     });
     loginPanel.classList.add("hidden");
     workspace.classList.remove("hidden");
-    addNotice("Login succeeded. Run a hardening scan when ready.", "success");
+    addNotice(result.moraMode ? "Welcome to Mor-a Mode. Run a scan to process active domains sequentially." : "Login succeeded. Run a hardening scan when ready.", "success");
   } catch (error) {
     sessionId = "";
     connectionLabel.textContent = "Not connected";
@@ -2046,6 +2128,7 @@ reauthForm.addEventListener("submit", async (event) => {
     const form = new FormData(reauthForm);
     const authMode = form.get("authMode") || "password";
     const mdsScan = form.get("mdsScan") === "on";
+    const moraMode = moraModeEnabled && mdsScan;
     const result = await api("/api/login", {
       host: form.get("host"),
       port: form.get("port"),
@@ -2055,7 +2138,8 @@ reauthForm.addEventListener("submit", async (event) => {
       apiKey: form.get("apiKey"),
       smart1Cloud: form.get("smart1Cloud") === "on",
       mdsScan,
-      domain: mdsScan ? form.get("domain") : "",
+      moraMode,
+      domain: mdsScan && !moraMode ? form.get("domain") : "",
       managementObjectName: mdsScan ? form.get("managementObjectName") : "",
       ignoreTls: form.get("ignoreTls") === "on",
       largeEnvironmentMode: form.get("largeEnvironmentMode") === "on"
@@ -2134,6 +2218,7 @@ logoutButton.addEventListener("click", async () => {
     sessionId = "";
     hardeningScan = null;
     openCheckGroups.clear();
+    openMoraDomains.clear();
     connectionLabel.textContent = "Not connected";
     setLoginStatus("Not connected.", "disconnected");
     renderChecks();

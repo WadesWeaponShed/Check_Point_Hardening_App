@@ -7,6 +7,7 @@ import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
+import JSZip from "jszip";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -172,8 +173,7 @@ function runProcess(command, args, options = {}) {
   });
 }
 
-async function generateHardeningReportPdf(session) {
-  const scan = session.lastHardeningScan;
+async function generateHardeningReportPdfFromScan(scan) {
   if (!scan?.checks?.length) {
     throw enrichError(new Error("Run a scan before exporting a PDF report."), {
       phase: "report-scan"
@@ -209,6 +209,41 @@ async function generateHardeningReportPdf(session) {
       command: `${REPORT_NODE} ${REPORT_GENERATOR}`
     });
   }
+}
+
+async function generateHardeningReportPdf(session) {
+  return generateHardeningReportPdfFromScan(session.lastHardeningScan);
+}
+
+function safeReportFilename(value) {
+  return String(value || "domain")
+    .normalize("NFKD")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 100) || "domain";
+}
+
+async function generateMoraDomainReportsZip(session) {
+  const scan = session.lastHardeningScan;
+  const domains = Array.isArray(scan?.domains) ? scan.domains.filter((domain) => domain.scan?.checks?.length) : [];
+  if (!scan?.moraMode || !domains.length) {
+    throw enrichError(new Error("Run a successful Mor-a Mode scan before exporting domain reports."), {
+      phase: "report-scan"
+    });
+  }
+  const zip = new JSZip();
+  for (const domain of domains) {
+    const report = await generateHardeningReportPdfFromScan({
+      ...domain.scan,
+      reportDomainName: domain.name
+    });
+    try {
+      zip.file(`${safeReportFilename(domain.name)}-hardening-report.pdf`, report.file);
+    } finally {
+      await report.cleanup();
+    }
+  }
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
 }
 
 function enrichError(error, details) {
@@ -325,6 +360,30 @@ function recordScanCommand(session, entry) {
     session.scanProgress.completedSteps = session.scanProgress.steps.length;
     session.scanProgress.currentStep = commandEntry.command;
     session.scanProgress.percent = Math.min(95, Math.max(8, Math.round(session.scanProgress.completedSteps * 3.5)));
+  }
+  const mora = session?.moraProgress;
+  if (mora?.parent?.scanProgress) {
+    const childPercent = Number(session.scanProgress?.percent || 0);
+    const overallPercent = Math.min(99, Math.round(((mora.index + childPercent / 100) / mora.total) * 100));
+    mora.parent.scanProgress.steps.push({
+      timestamp: commandEntry.timestamp,
+      command: `${mora.domainName}: ${commandEntry.command}`,
+      status: commandEntry.status,
+      target: commandEntry.target,
+      phase: commandEntry.phase,
+      statusCode: commandEntry.statusCode,
+      durationMs: commandEntry.durationMs,
+      error: commandEntry.error
+    });
+    if (mora.parent.scanProgress.steps.length > 30) {
+      mora.parent.scanProgress.steps.splice(0, mora.parent.scanProgress.steps.length - 30);
+    }
+    mora.parent.scanProgress.completedSteps += 1;
+    mora.parent.scanProgress.currentStep = `Domain ${mora.index + 1} of ${mora.total}: ${mora.domainName} - ${commandEntry.command}`;
+    mora.parent.scanProgress.currentDomain = mora.domainName;
+    mora.parent.scanProgress.currentDomainIndex = mora.index + 1;
+    mora.parent.scanProgress.totalDomains = mora.total;
+    mora.parent.scanProgress.percent = overallPercent;
   }
 }
 
@@ -473,16 +532,57 @@ function cpRequestUnqueued(session, command, body = {}) {
   });
 }
 
+function moraDomainIsActive(domain = {}) {
+  if (domain.active === false) return false;
+  if (domain.active === true) return true;
+  const servers = Array.isArray(domain.servers) ? domain.servers : [];
+  if (!servers.length) return true;
+  return servers.some((server) => (
+    server?.active === true ||
+    normalizeToken(server?.status || server?.state || server?.role || "").includes("active")
+  ));
+}
+
+async function discoverMoraDomains(session) {
+  const objects = [];
+  let offset = 0;
+  while (true) {
+    const page = await cpRequest(session, "show-domains", {
+      offset,
+      limit: PAGE_LIMIT,
+      "details-level": "full"
+    });
+    const pageObjects = Array.isArray(page.objects) ? page.objects : [];
+    objects.push(...pageObjects);
+    offset += pageObjects.length;
+    const total = Number(page.total || page["total-objects"] || objects.length);
+    if (!pageObjects.length || pageObjects.length < PAGE_LIMIT || offset >= total) break;
+  }
+  return objects
+    .filter((domain) => domain?.name && domain?.uid && moraDomainIsActive(domain))
+    .map((domain) => ({
+      name: String(domain.name),
+      uid: String(domain.uid),
+      servers: Array.isArray(domain.servers) ? domain.servers : []
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 async function login(payload) {
   const smart1Cloud = payload.smart1Cloud === true || payload.smart1Cloud === "true" || payload.smart1Cloud === "on";
   const baseUrl = normalizeBaseUrl(payload.host, payload.port, { smart1Cloud });
-  const mdsMode = payload.mdsScan === true || payload.mdsScan === "true" || payload.mdsScan === "on" || Boolean(String(payload.managementObjectName || "").trim());
+  const moraMode = payload.moraMode === true || payload.moraMode === "true" || payload.moraMode === "on";
+  const mdsMode = moraMode || payload.mdsScan === true || payload.mdsScan === "true" || payload.mdsScan === "on" || Boolean(String(payload.managementObjectName || "").trim());
+  if (moraMode && smart1Cloud) {
+    throw new Error("Mor-a Mode requires a Multi-Domain Server and cannot be used with Smart-1 Cloud.");
+  }
   log("Login request received", {
     target: `${cpApiUrl({ baseUrl, smart1Cloud }, "login").origin}${cpApiUrl({ baseUrl, smart1Cloud }, "login").pathname}`,
     user: payload.username || "",
     domain: payload.domain || "",
     smart1Cloud,
     mdsMode,
+    moraMode,
     managementObjectName: payload.managementObjectName || ""
   });
   const session = {
@@ -491,7 +591,8 @@ async function login(payload) {
     largeEnvironmentMode: payload.largeEnvironmentMode === true || payload.largeEnvironmentMode === "true" || payload.largeEnvironmentMode === "on",
     smart1Cloud,
     mdsMode,
-    domain: String(payload.domain || "").trim(),
+    moraMode,
+    domain: moraMode ? "" : String(payload.domain || "").trim(),
     managementObjectName: String(payload.managementObjectName || "").trim()
   };
   const authMode = payload.authMode === "api-key" ? "api-key" : "password";
@@ -511,7 +612,7 @@ async function login(payload) {
       throw new Error("Password is required.");
     }
   }
-  if (payload.domain) {
+  if (payload.domain && !moraMode) {
     loginBody.domain = String(payload.domain);
   }
   const loginResult = await cpRequest(session, "login", loginBody);
@@ -577,9 +678,32 @@ async function login(payload) {
   } catch (error) {
     systemDataLoginError = commandError(error);
   }
+  let moraDomains = [];
+  if (moraMode) {
+    const inventorySession = { ...session, sid: mdsSid || loginResult.sid };
+    const discoveredDomains = await discoverMoraDomains(inventorySession);
+    if (!discoveredDomains.length) {
+      throw new Error("Mor-a Mode did not find any active MDS domains available to this administrator.");
+    }
+    for (const domain of discoveredDomains) {
+      try {
+        const domainLoginBody = { domain: domain.name };
+        if (authMode === "api-key") {
+          domainLoginBody["api-key"] = loginBody["api-key"];
+        } else {
+          domainLoginBody.user = loginBody.user;
+          domainLoginBody.password = loginBody.password;
+        }
+        const domainLogin = await cpRequest(session, "login", domainLoginBody);
+        moraDomains.push({ ...domain, sid: domainLogin.sid || "", loginError: domainLogin.sid ? null : { error: domainLogin.message || "Domain login did not return a session ID." } });
+      } catch (error) {
+        moraDomains.push({ ...domain, sid: "", loginError: commandError(error) });
+      }
+    }
+  }
   const loginUser = loginBody.user || "API Key";
   const id = randomUUID();
-  sessions.set(id, {
+  const rootSession = {
     id,
     ...session,
     sid: loginResult.sid,
@@ -592,11 +716,39 @@ async function login(payload) {
     largeEnvironmentMode: session.largeEnvironmentMode,
     smart1Cloud: session.smart1Cloud,
     mdsMode: session.mdsMode,
+    moraMode,
     managementObjectName: session.managementObjectName,
     createdAt: Date.now(),
     lastHardeningScan: null
-  });
-  return { sessionId: id, user: loginUser, baseUrl, largeEnvironmentMode: session.largeEnvironmentMode, smart1Cloud: session.smart1Cloud, mdsMode: session.mdsMode, managementObjectName: session.managementObjectName };
+  };
+  rootSession.moraDomains = moraDomains.map((domain, index) => ({
+    name: domain.name,
+    uid: domain.uid,
+    servers: domain.servers,
+    loginError: domain.loginError,
+    session: domain.sid ? {
+      ...rootSession,
+      id: `${id}:domain:${index}`,
+      sid: domain.sid,
+      domain: domain.name,
+      moraMode: true,
+      moraRootSession: rootSession,
+      moraDomains: undefined,
+      lastHardeningScan: null
+    } : null
+  }));
+  sessions.set(id, rootSession);
+  return {
+    sessionId: id,
+    user: loginUser,
+    baseUrl,
+    largeEnvironmentMode: session.largeEnvironmentMode,
+    smart1Cloud: session.smart1Cloud,
+    mdsMode: session.mdsMode,
+    moraMode,
+    domains: rootSession.moraDomains.map((domain) => ({ name: domain.name, uid: domain.uid, available: Boolean(domain.session) })),
+    managementObjectName: session.managementObjectName
+  };
 }
 
 function getSession(sessionId) {
@@ -7216,6 +7368,101 @@ async function scanHardening(session) {
   return result;
 }
 
+function mergeScanSummaries(domainResults = []) {
+  return domainResults.reduce((summary, domain) => {
+    for (const [status, count] of Object.entries(domain.scan?.summary || {})) {
+      summary[status] = Number(summary[status] || 0) + Number(count || 0);
+    }
+    return summary;
+  }, {});
+}
+
+async function scanMoraHardening(session) {
+  const domains = Array.isArray(session.moraDomains) ? session.moraDomains : [];
+  if (!domains.length) {
+    throw new Error("Mor-a Mode has no discovered domains. Log in again and retry.");
+  }
+  const startedAt = new Date().toISOString();
+  session.scanProgress = {
+    active: true,
+    failed: false,
+    complete: false,
+    percent: 1,
+    completedSteps: 0,
+    currentStep: `Preparing sequential scan of ${domains.length} domains`,
+    currentDomain: "",
+    currentDomainIndex: 0,
+    totalDomains: domains.length,
+    startedAt,
+    completedAt: "",
+    steps: []
+  };
+  const domainResults = [];
+  for (let index = 0; index < domains.length; index += 1) {
+    const domain = domains[index];
+    session.scanProgress.currentDomain = domain.name;
+    session.scanProgress.currentDomainIndex = index + 1;
+    session.scanProgress.currentStep = `Domain ${index + 1} of ${domains.length}: ${domain.name}`;
+    session.scanProgress.percent = Math.max(1, Math.round((index / domains.length) * 100));
+    if (!domain.session || domain.loginError) {
+      domainResults.push({
+        name: domain.name,
+        uid: domain.uid,
+        error: domain.loginError?.error || "Domain login was unavailable.",
+        scan: null
+      });
+      continue;
+    }
+    domain.session.moraProgress = {
+      parent: session,
+      index,
+      total: domains.length,
+      domainName: domain.name
+    };
+    try {
+      const scan = await scanHardening(domain.session);
+      domainResults.push({ name: domain.name, uid: domain.uid, error: "", scan });
+    } catch (error) {
+      domainResults.push({ name: domain.name, uid: domain.uid, error: error.message || "Domain scan failed.", scan: null });
+    } finally {
+      domain.session.moraProgress = null;
+    }
+    session.scanProgress.percent = Math.round(((index + 1) / domains.length) * 100);
+  }
+  const successful = domainResults.filter((domain) => domain.scan);
+  const failed = domainResults.filter((domain) => !domain.scan);
+  const result = {
+    moraMode: true,
+    scannedAt: new Date().toISOString(),
+    user: session.user || "Unknown",
+    baseUrl: session.baseUrl,
+    guide: successful[0]?.scan?.guide || {
+      title: "Check Point Gateway and Management Hardening Administration Guide",
+      date: "01 June 2026",
+      url: HARDENING_GUIDE_URL
+    },
+    scanMode: session.largeEnvironmentMode ? "mora-large-environment" : "mora-sequential",
+    summary: mergeScanSummaries(domainResults),
+    domains: domainResults,
+    checks: [],
+    commandLog: successful.flatMap((domain) => (domain.scan.commandLog || []).map((entry) => ({ ...entry, domain: domain.name }))),
+    commandResults: Object.fromEntries(successful.flatMap((domain) => Object.entries(domain.scan.commandResults || {}).map(([command, value]) => [`${domain.name}: ${command}`, value])))
+  };
+  session.lastHardeningScan = result;
+  session.scanProgress = {
+    ...session.scanProgress,
+    active: false,
+    complete: true,
+    failed: successful.length === 0,
+    percent: 100,
+    currentStep: failed.length
+      ? `Completed ${successful.length} domain scan${successful.length === 1 ? "" : "s"}; ${failed.length} domain${failed.length === 1 ? "" : "s"} failed`
+      : `Completed all ${successful.length} domain scans`,
+    completedAt: new Date().toISOString()
+  };
+  return result;
+}
+
 async function evaluateSingleHardeningCheck(session, checkId) {
   switch (checkId) {
     case "mgmt.trusted-clients": {
@@ -9071,20 +9318,24 @@ async function logout(sessionId) {
     return;
   }
   try {
-    const logoutTargets = [
-      session,
-      session.systemDataSid ? {
+    const sessionIds = uniqueStrings([
+      session.sid,
+      session.systemDataSid,
+      session.mdsSid,
+      session.globalDomainSid,
+      ...(session.moraDomains || []).map((domain) => domain.session?.sid)
+    ]);
+    const logoutTargets = sessionIds.map((sid) => ({
         baseUrl: session.baseUrl,
         rejectUnauthorized: session.rejectUnauthorized,
-        sid: session.systemDataSid
-      } : null
-    ].filter(Boolean);
+        sid
+      }));
     for (const target of logoutTargets) {
       try {
         await cpRequest(target, "logout", {});
       } catch (error) {
         log("Logout request failed", {
-          target: target.sid === session.systemDataSid ? "System Data" : "primary",
+          target: target.sid === session.systemDataSid ? "System Data" : "session",
           error: error.message
         });
       }
@@ -9250,7 +9501,7 @@ async function handleApi(req, res) {
       log("Local API request", { requestId, route: "/api/scan" });
       const session = getSession(payload.sessionId);
       try {
-        sendJson(res, 200, { requestId, ...(await scanHardening(session)) });
+        sendJson(res, 200, { requestId, ...(session.moraMode ? await scanMoraHardening(session) : await scanHardening(session)) });
       } catch (error) {
         if (session.scanProgress) {
           session.scanProgress = {
@@ -9556,6 +9807,16 @@ async function handleApi(req, res) {
     if (req.url === "/api/export-pdf" && req.method === "POST") {
       log("Local API request", { requestId, route: req.url });
       const session = getSession(payload.sessionId);
+      if (session.moraMode) {
+        const archive = await generateMoraDomainReportsZip(session);
+        res.writeHead(200, {
+          "content-type": "application/zip",
+          "content-disposition": `attachment; filename="mora-mode-domain-hardening-reports.zip"`,
+          "content-length": archive.length
+        });
+        res.end(archive);
+        return;
+      }
       const result = await generateHardeningReportPdf(session);
       addAuditEntry({
         session,
