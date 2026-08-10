@@ -10,11 +10,12 @@
     "install:browsers": "playwright install chromium"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "jszip": "^3.10.1",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
     "playwright": "^1.54.1"
   }
 }

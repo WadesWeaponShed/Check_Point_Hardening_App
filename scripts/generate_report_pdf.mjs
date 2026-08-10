@@ -4,10 +4,11 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
-const { PDFDocument } = require("pdf-lib");
+const { PDFArray, PDFDict, PDFDocument, PDFName, PDFNull } = require("pdf-lib");
 
 const STATUS_LABELS = {
   "remediation-required": "Remediation Recommended",
@@ -279,6 +280,50 @@ function groupChecks(checks) {
   return groups;
 }
 
+function reportSections(checks) {
+  return [...groupChecks(checks).entries()].map(([category, categoryChecks], categoryIndex) => ({
+    id: `report-category-${categoryIndex + 1}`,
+    marker: `CPTOC_CATEGORY_${categoryIndex + 1}`,
+    title: category,
+    checks: categoryChecks.map((check, checkIndex) => ({
+      check,
+      id: `report-check-${categoryIndex + 1}-${checkIndex + 1}`,
+      marker: `CPTOC_CHECK_${categoryIndex + 1}_${checkIndex + 1}`
+    }))
+  }));
+}
+
+function renderToc(sections, pageNumbers = {}) {
+  return `
+    <section class="table-of-contents">
+      <h2>Table of Contents</h2>
+      <p class="toc-intro">Select any entry to jump directly to that section.</p>
+      <ol class="toc-categories">
+        ${sections.map((section) => `
+          <li class="toc-category">
+            <a href="#${section.id}">
+              <span class="toc-label">${escapeHtml(section.title)}</span>
+              <span class="toc-leader" aria-hidden="true"></span>
+              <span class="toc-page">${escapeHtml(String(pageNumbers[section.marker] || "000"))}</span>
+            </a>
+            <ol class="toc-checks">
+              ${section.checks.map(({ check, id, marker }) => `
+                <li>
+                  <a href="#${id}">
+                    <span class="toc-label">${escapeHtml(check.title || "Untitled Check")}</span>
+                    <span class="toc-leader" aria-hidden="true"></span>
+                    <span class="toc-page">${escapeHtml(String(pageNumbers[marker] || "000"))}</span>
+                  </a>
+                </li>
+              `).join("")}
+            </ol>
+          </li>
+        `).join("")}
+      </ol>
+    </section>
+  `;
+}
+
 function checksByStatuses(checks, statuses) {
   const allowed = new Set(statuses);
   return checks.filter((check) => allowed.has(check.status || "unknown"));
@@ -307,7 +352,7 @@ function renderSummaryCard({ className = "", count, label, checks, emptyText }) 
   `;
 }
 
-function renderHtml(scan, pageSize) {
+function renderHtml(scan, pageSize, pageNumbers = {}) {
   const checks = scan.checks || [];
   const summary = scan.summary || countSummary(checks);
   const remediationCount = Number(summary["remediation-required"] || 0) + Number(summary["remediation-recommended"] || 0);
@@ -316,7 +361,7 @@ function renderHtml(scan, pageSize) {
   const remediationChecks = checksByStatuses(checks, ["remediation-required", "remediation-recommended"]);
   const reviewChecks = checksByStatuses(checks, ["needs-review", "remediation-review-recommended"]);
   const manualChecks = checksByStatuses(checks, ["manual", "informational"]);
-  const groups = groupChecks(checks);
+  const sections = reportSections(checks);
   return `<!doctype html>
 <html>
 <head>
@@ -351,6 +396,20 @@ function renderHtml(scan, pageSize) {
     .summary-list li { margin: 0 0 2px; break-inside: avoid; }
     .summary-card:first-child .summary-list { columns: 2; column-gap: 18px; }
     .summary-empty { margin: 0; color: #65758b; font-size: 9px; font-weight: 700; }
+    .table-of-contents { break-before: page; page-break-before: always; }
+    .table-of-contents h2 { margin: 0 0 4px; color: #142033; font-size: 24px; line-height: 1.1; }
+    .toc-intro { margin: 0 0 13px; color: #65758b; font-size: 10px; font-weight: 700; }
+    .toc-categories, .toc-checks { list-style: none; margin: 0; padding: 0; }
+    .toc-category { break-inside: avoid; margin: 0 0 7px; }
+    .toc-category > a { color: #142033; font-size: 11px; font-weight: 900; }
+    .toc-checks { margin: 3px 0 0 15px; }
+    .toc-checks li { break-inside: avoid; margin: 0 0 2px; }
+    .toc-checks a { color: #40516a; font-size: 9.5px; font-weight: 700; }
+    .table-of-contents a { display: flex; align-items: baseline; gap: 6px; text-decoration: none; }
+    .toc-label { min-width: 0; }
+    .toc-leader { flex: 1 1 auto; min-width: 16px; border-bottom: 1px dotted #aab5c3; transform: translateY(-2px); }
+    .toc-page { flex: 0 0 24px; color: #d72d67; text-align: right; font-variant-numeric: tabular-nums; }
+    .toc-marker { position: absolute; color: #ffffff; font-size: 1px; line-height: 1; }
     .category { margin-top: 0; break-before: page; page-break-before: always; break-inside: auto; }
     .category h2 { margin: 0 0 10px; color: #ee0c5d; font-size: 20px; line-height: 1.12; break-after: avoid; }
     .check-card { break-inside: auto; border: 1px solid #d8e0ea; border-radius: 8px; padding: 12px; margin: 0 0 12px; }
@@ -406,18 +465,52 @@ function renderHtml(scan, pageSize) {
     ${renderSummaryCard({ className: "summary-review", count: reviewCount, label: "Review Recommended", checks: reviewChecks, emptyText: "No review recommended" })}
     ${renderSummaryCard({ className: "summary-manual", count: manualCount, label: "Manual / Informational", checks: manualChecks, emptyText: "No manual or informational checks" })}
   </div>
-  ${[...groups.entries()].map(([category, categoryChecks]) => `
-    <section class="category">
-      <h2>${escapeHtml(category)}</h2>
-      ${categoryChecks.map(renderCheck).join("")}
+  ${renderToc(sections, pageNumbers)}
+  ${sections.map((section) => `
+    <section class="category" id="${section.id}">
+      <span class="toc-marker">${section.marker}</span>
+      <h2>${escapeHtml(section.title)}</h2>
+      ${section.checks.map(({ check, id, marker }) => `
+        <div id="${id}">
+          <span class="toc-marker">${marker}</span>
+          ${renderCheck(check)}
+        </div>
+      `).join("")}
     </section>
   `).join("")}
 </body>
 </html>`;
 }
 
+async function extractTocPageNumbers(pdfBytes, sections) {
+  const markers = sections.flatMap((section) => [section.marker, ...section.checks.map((check) => check.marker)]);
+  const remaining = new Set(markers);
+  const pageNumbers = {};
+  const document = await getDocument({ data: new Uint8Array(pdfBytes), disableWorker: true }).promise;
+  try {
+    for (let pageNumber = 1; pageNumber <= document.numPages && remaining.size; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const pageText = content.items.map((item) => item.str || "").join("");
+      for (const marker of [...remaining]) {
+        if (pageText.includes(marker)) {
+          pageNumbers[marker] = pageNumber;
+          remaining.delete(marker);
+        }
+      }
+      page.cleanup();
+    }
+  } finally {
+    await document.destroy();
+  }
+  if (remaining.size) {
+    throw new Error(`Could not determine report page numbers for: ${[...remaining].join(", ")}`);
+  }
+  return pageNumbers;
+}
+
 async function renderBodyPdf(scan, outputPath, pageSize) {
-  const html = renderHtml(scan, pageSize);
+  const sections = reportSections(scan.checks || []);
   const chromePaths = [
     process.env.REPORT_CHROME_PATH,
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -431,9 +524,7 @@ async function renderBodyPdf(scan, outputPath, pageSize) {
   });
   try {
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "load" });
-    await page.pdf({
-      path: outputPath,
+    const pdfOptions = {
       width: pointsToInches(pageSize.width),
       height: pointsToInches(pageSize.height),
       printBackground: true,
@@ -451,13 +542,46 @@ async function renderBodyPdf(scan, outputPath, pageSize) {
         bottom: "0.42in",
         left: "0.38in"
       }
-    });
+    };
+    await page.setContent(renderHtml(scan, pageSize), { waitUntil: "load" });
+    const firstPass = await page.pdf(pdfOptions);
+    const pageNumbers = await extractTocPageNumbers(firstPass, sections);
+    await page.setContent(renderHtml(scan, pageSize, pageNumbers), { waitUntil: "load" });
+    await page.pdf({ ...pdfOptions, path: outputPath });
+    return Object.fromEntries(sections.flatMap((section) => [
+      [section.id, pageNumbers[section.marker]],
+      ...section.checks.map((check) => [check.id, pageNumbers[check.marker]])
+    ]));
   } finally {
     await browser.close();
   }
 }
 
-async function mergePdfs(basePath, bodyPath, outputPath) {
+function rewriteInternalDestinations(merged, copiedBody, destinations) {
+  for (const page of copiedBody) {
+    const annotationsValue = page.node.get(PDFName.of("Annots"));
+    if (!annotationsValue) continue;
+    const annotations = merged.context.lookup(annotationsValue, PDFArray);
+    for (let index = 0; index < annotations.size(); index += 1) {
+      const annotation = merged.context.lookup(annotations.get(index), PDFDict);
+      const destination = annotation.get(PDFName.of("Dest"));
+      if (!destination || typeof destination.asString !== "function") continue;
+      const destinationId = destination.asString().replace(/^\//, "");
+      const bodyPageNumber = Number(destinations[destinationId] || 0);
+      const targetPage = copiedBody[bodyPageNumber - 1];
+      if (!targetPage) continue;
+      const explicitDestination = PDFArray.withContext(merged.context);
+      explicitDestination.push(targetPage.ref);
+      explicitDestination.push(PDFName.of("XYZ"));
+      explicitDestination.push(PDFNull);
+      explicitDestination.push(PDFNull);
+      explicitDestination.push(PDFNull);
+      annotation.set(PDFName.of("Dest"), explicitDestination);
+    }
+  }
+}
+
+async function mergePdfs(basePath, bodyPath, outputPath, destinations = {}) {
   const merged = await PDFDocument.create();
   if (!existsSync(basePath)) {
     throw new Error(`Report cover PDF not found: ${basePath}`);
@@ -468,6 +592,7 @@ async function mergePdfs(basePath, bodyPath, outputPath) {
   const body = await PDFDocument.load(await readFile(bodyPath), { ignoreEncryption: true });
   const copiedBody = await merged.copyPages(body, body.getPageIndices());
   copiedBody.forEach((page) => merged.addPage(page));
+  rewriteInternalDestinations(merged, copiedBody, destinations);
   await writeFile(outputPath, await merged.save());
 }
 
@@ -489,8 +614,8 @@ async function main() {
   const scan = JSON.parse(await readFile(args["scan-json"], "utf8"));
   const bodyPath = join(dirname(args.output), "report-body.pdf");
   const pageSize = await basePageSize(args["base-pdf"]);
-  await renderBodyPdf(scan, bodyPath, pageSize);
-  await mergePdfs(args["base-pdf"], bodyPath, args.output);
+  const destinations = await renderBodyPdf(scan, bodyPath, pageSize);
+  await mergePdfs(args["base-pdf"], bodyPath, args.output, destinations);
 }
 
 main().catch((error) => {
