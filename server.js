@@ -6008,7 +6008,7 @@ function evaluateGatewayObjectStatus(result) {
   return makeCheck({
     id: "policy.gateway-object-status",
     category: "Decreasing Security Gateway Exposure with Policy",
-    title: "Gateway Object Status",
+    title: "Gateway Object SIC Status",
     recommendation: "Delete gateway objects that no longer have SIC established after confirming they are no longer required. Stale gateway objects may represent old infrastructure and can leave unnecessary IP access exposed in policy or management configuration.",
     status: rows.length ? "remediation-recommended" : (result.results?.length ? "pass" : "unknown"),
     severity: rows.length ? "high" : "info",
@@ -6024,7 +6024,7 @@ function evaluateGatewayObjectStatus(result) {
     details: rows.length
       ? "Only objects that did not return a Communicating SIC state are shown. These objects were skipped by subsequent gateway-level checks to avoid repeated run-script failures and unnecessary scan time. Validate that an object is obsolete before deleting it."
       : "Only gateway and cluster member objects that do not return a Communicating SIC state appear in this subsection.",
-    source: "Hardening review: Decreasing Security Gateway Exposure with Policy - Gateway Object Status",
+    source: "Hardening review: Decreasing Security Gateway Exposure with Policy - Gateway Object SIC Status",
     commands: [result.command || "mgmt_cli -r true test-sic-status name <gateway-or-cluster-member>"]
   });
 }
@@ -7315,9 +7315,15 @@ async function scanHardening(session) {
     tryListObjects(session, "show-address-ranges", { "details-level": "full" })
   ]);
   const discoveredGatewayInventory = gatewayServerInventory(gatewaysAndServers, gateways);
-  session.scanProgress.currentStep = "Checking gateway SIC communication before gateway scans";
-  const gatewaySicStatus = await collectGatewaySicStatusEvidence(session, discoveredGatewayInventory, gatewaysAndServers);
-  const gatewayInventory = filterGatewayInventoryBySic(discoveredGatewayInventory, gatewaySicStatus);
+  if (!session.smart1Cloud) {
+    session.scanProgress.currentStep = "Checking gateway SIC communication before gateway scans";
+  }
+  const gatewaySicStatus = session.smart1Cloud
+    ? null
+    : await collectGatewaySicStatusEvidence(session, discoveredGatewayInventory, gatewaysAndServers);
+  const gatewayInventory = gatewaySicStatus
+    ? filterGatewayInventoryBySic(discoveredGatewayInventory, gatewaySicStatus)
+    : discoveredGatewayInventory;
   const adGatewayObjects = {
     ok: gatewayInventory.ok,
     objects: [
@@ -7387,7 +7393,7 @@ async function scanHardening(session) {
     ...evaluateGlobalProperties(globalProperties, session),
     evaluateJumboHotfixAccumulator(jumboHotfixEvidence, session),
     evaluateGatewayStealthRules(gatewayStealthRules, session),
-    evaluateGatewayObjectStatus(gatewaySicStatus),
+    ...(gatewaySicStatus ? [evaluateGatewayObjectStatus(gatewaySicStatus)] : []),
     evaluateActiveDirectoryIntegrationAccounts(activeDirectoryIntegrations, session),
     evaluateCloudControllerIntegrations(dataCenterServers, session),
     evaluateGaiaAllowedHostAccess(gaiaAllowedHostAccess, session),
@@ -7442,7 +7448,9 @@ async function scanHardening(session) {
       "show-networks": networks.ok ? "ok" : networks.error,
       "show-address-ranges": addressRanges.ok ? "ok" : addressRanges.error,
       "gateway-inventory": gatewayInventory.ok ? "ok" : gatewayInventory.error,
-      "mgmt_cli/test-sic-status": gatewaySicStatus.ok ? "ok" : { error: `${gatewaySicStatus.rows?.length || 0} gateway object${(gatewaySicStatus.rows?.length || 0) === 1 ? " is" : "s are"} not communicating` },
+      ...(gatewaySicStatus ? {
+        "mgmt_cli/test-sic-status": gatewaySicStatus.ok ? "ok" : { error: `${gatewaySicStatus.rows?.length || 0} gateway object${(gatewaySicStatus.rows?.length || 0) === 1 ? " is" : "s are"} not communicating` }
+      } : {}),
       ...(skipManagementPlaneProtection ? {} : {
         "run-script/management-firewall": managementFirewallProtection.ok ? "ok" : { error: `${managementFirewallProtection.errors?.length || 0} lookup error${(managementFirewallProtection.errors?.length || 0) === 1 ? "" : "s"}` }
       }),
