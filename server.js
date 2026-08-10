@@ -1964,7 +1964,8 @@ function isClusterGatewayObject(object = {}) {
 }
 
 function isClusterMemberObject(object = {}) {
-  return gatewayServerType(object) === "clustermember";
+  const type = gatewayServerType(object);
+  return type === "clustermember" || type === "cpmiclustermember" || (type.includes("cluster") && type.includes("member"));
 }
 
 function isManagementServerObject(object = {}) {
@@ -2017,6 +2018,117 @@ function gatewayServerInventory(gatewaysAndServersResult, fallbackGatewaysResult
     managedGateways: dedupe(managedGateways),
     runScriptTargets: dedupe(runScriptTargets),
     topologyObjects: dedupe(topologyObjects)
+  };
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value ?? "").replaceAll("'", `'"'"'`)}'`;
+}
+
+function gatewayObjectIpAddress(gateway = {}) {
+  return gateway["ipv4-address"] || gateway.ipv4Address || gateway["ip-address"] || gateway.ipAddress
+    || firstIpv4(allIpv4Values(gateway).join(" ")) || "Not returned";
+}
+
+function parseSicStatusMessage(output, gatewayName) {
+  const text = String(output || "").trim();
+  const line = text.split(/\r?\n/).find((entry) => /^\s*sic-message\s*:/i.test(entry));
+  const rawMessage = line
+    ? line.replace(/^\s*sic-message\s*:\s*/i, "").trim().replace(/^(["'])(.*)\1$/, "$2")
+    : text;
+  const statusMatch = rawMessage.match(/SIC\s+Status\s+for\s+.+?:\s*(.+?)\s*$/i);
+  const rawStatus = (statusMatch?.[1] || rawMessage || "Unknown").trim();
+  const statusToken = normalizeToken(rawStatus);
+  const statusLabels = new Map([
+    ["uninitialized", "Uninitialized"],
+    ["initialized", "Initialized"],
+    ["notcommunicating", "Not Communicating"],
+    ["unknown", "Unknown"],
+    ["failed", "Failed"],
+    ["waitingforfirstconnection", "Waiting For First Connection"],
+    ["communicating", "Communicating"]
+  ]);
+  const status = statusLabels.get(statusToken) || "Unknown";
+  return {
+    message: rawMessage || `SIC Status for ${gatewayName}: No status returned`,
+    status,
+    communicating: status === "Communicating"
+  };
+}
+
+async function collectGatewaySicStatusEvidence(session, gatewayInventory, gatewaysAndServersResult) {
+  const management = resolveManagementRunScriptTarget(session, gatewaysAndServersResult);
+  const targets = [...(gatewayInventory.simpleGateways || []), ...(gatewayInventory.clusterMembers || [])];
+  const seen = new Set();
+  const uniqueTargets = targets.filter((gateway) => {
+    const key = gateway.uid || normalizeToken(gateway.name || gateway.NAME || "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (!management.name) {
+    return {
+      ok: false,
+      command: "mgmt_cli -r true test-sic-status",
+      rows: uniqueTargets.map((gateway) => ({
+        "Object Name": gateway.name || gateway.NAME || gateway.uid || "Unknown gateway",
+        "Object IP-Address": gatewayObjectIpAddress(gateway),
+        "SIC Status": "Failed"
+      })),
+      blockedKeys: new Set(uniqueTargets.flatMap((gateway) => [gateway.uid, normalizeToken(gateway.name || gateway.NAME || "")]).filter(Boolean)),
+      results: []
+    };
+  }
+
+  const results = await Promise.all(uniqueTargets.map(async (gateway) => {
+    const name = gateway.name || gateway.NAME || gateway.uid || "";
+    const domainOption = session?.mdsMode && session?.domain ? ` -d ${shellSingleQuote(session.domain)}` : "";
+    const command = `mgmt_cli -r true${domainOption} test-sic-status name ${shellSingleQuote(name)}`;
+    const result = await runScriptWithTaskDetails(mdsRunScriptSession(session, management), {
+      "script-name": `test SIC status - ${name}`,
+      targets: [management.name],
+      script: command
+    });
+    const parsed = result.ok
+      ? parseSicStatusMessage(runScriptOutputText(result), name)
+      : { message: runScriptDisplayError(result, "SIC status lookup failed"), status: "Failed", communicating: false };
+    return { gateway, name, command, result, ...parsed };
+  }));
+
+  const nonCommunicating = results.filter((result) => !result.communicating);
+  const blockedKeys = new Set(nonCommunicating.flatMap(({ gateway }) => [
+    gateway.uid,
+    normalizeToken(gateway.name || gateway.NAME || "")
+  ]).filter(Boolean));
+  return {
+    ok: nonCommunicating.length === 0,
+    command: "mgmt_cli -r true test-sic-status name <gateway-or-cluster-member>",
+    rows: nonCommunicating.map(({ gateway, name, status }) => ({
+      "Object Name": name,
+      "Object IP-Address": gatewayObjectIpAddress(gateway),
+      "SIC Status": status
+    })),
+    blockedKeys,
+    results
+  };
+}
+
+function filterGatewayInventoryBySic(gatewayInventory, sicEvidence) {
+  const blocked = sicEvidence?.blockedKeys || new Set();
+  const isBlocked = (gateway) => blocked.has(gateway?.uid) || blocked.has(normalizeToken(gateway?.name || gateway?.NAME || ""));
+  const clusterIsBlocked = (cluster) => {
+    const memberNames = cluster?.["cluster-member-names"] || cluster?.clusterMemberNames || [];
+    return memberNames.length > 0 && memberNames.every((name) => blocked.has(normalizeToken(name)));
+  };
+  return {
+    ...gatewayInventory,
+    simpleGateways: gatewayInventory.simpleGateways.filter((gateway) => !isBlocked(gateway)),
+    clusters: gatewayInventory.clusters.filter((cluster) => !clusterIsBlocked(cluster)),
+    clusterMembers: gatewayInventory.clusterMembers.filter((gateway) => !isBlocked(gateway)),
+    policyTargets: gatewayInventory.policyTargets.filter((gateway) => !isBlocked(gateway) && !clusterIsBlocked(gateway)),
+    managedGateways: gatewayInventory.managedGateways.filter((gateway) => !isBlocked(gateway) && !clusterIsBlocked(gateway)),
+    runScriptTargets: gatewayInventory.runScriptTargets.filter((gateway) => !isBlocked(gateway)),
+    topologyObjects: gatewayInventory.topologyObjects.filter((gateway) => !isBlocked(gateway) && !clusterIsBlocked(gateway))
   };
 }
 
@@ -5884,6 +5996,32 @@ function evaluateGatewayStealthRules(result, session) {
   });
 }
 
+function evaluateGatewayObjectStatus(result) {
+  const rows = result.rows || [];
+  return makeCheck({
+    id: "policy.gateway-object-status",
+    category: "Decreasing Security Gateway Exposure with Policy",
+    title: "Gateway Object Status",
+    recommendation: "Delete gateway objects that no longer have SIC established after confirming they are no longer required. Stale gateway objects may represent old infrastructure and can leave unnecessary IP access exposed in policy or management configuration.",
+    status: rows.length ? "remediation-recommended" : (result.results?.length ? "pass" : "unknown"),
+    severity: rows.length ? "high" : "info",
+    evidence: rows.length
+      ? `${rows.length} managed gateway or cluster member object${rows.length === 1 ? " is" : "s are"} not communicating through SIC and were excluded from gateway-level scanning.`
+      : (result.results?.length
+        ? `All ${result.results.length} managed gateway and cluster member object${result.results.length === 1 ? " is" : "s are"} communicating through SIC.`
+        : "No managed gateway or cluster member objects were available for SIC validation."),
+    evidenceTable: rows.length ? {
+      columns: ["Object Name", "Object IP-Address", "SIC Status"],
+      rows
+    } : null,
+    details: rows.length
+      ? "Only objects that did not return a Communicating SIC state are shown. These objects were skipped by subsequent gateway-level checks to avoid repeated run-script failures and unnecessary scan time. Validate that an object is obsolete before deleting it."
+      : "Only gateway and cluster member objects that do not return a Communicating SIC state appear in this subsection.",
+    source: "Hardening review: Decreasing Security Gateway Exposure with Policy - Gateway Object Status",
+    commands: [result.command || "mgmt_cli -r true test-sic-status name <gateway-or-cluster-member>"]
+  });
+}
+
 function evaluateManagementFirewallProtection(result, session) {
   const source = "Hardening guide: Protect the Management Server Behind a Firewall";
   const behindValue = result.rows?.[0]?.["Management Server Behind Gateway"] || "";
@@ -7168,23 +7306,27 @@ async function scanHardening(session) {
     tryListObjects(session, "show-networks", { "details-level": "full" }),
     tryListObjects(session, "show-address-ranges", { "details-level": "full" })
   ]);
-  const gatewayInventory = gatewayServerInventory(gatewaysAndServers, gateways);
+  const discoveredGatewayInventory = gatewayServerInventory(gatewaysAndServers, gateways);
+  session.scanProgress.currentStep = "Checking gateway SIC communication before gateway scans";
+  const gatewaySicStatus = await collectGatewaySicStatusEvidence(session, discoveredGatewayInventory, gatewaysAndServers);
+  const gatewayInventory = filterGatewayInventoryBySic(discoveredGatewayInventory, gatewaySicStatus);
   const adGatewayObjects = {
-    ok: gateways.ok || clusters.ok,
+    ok: gatewayInventory.ok,
     objects: [
-      ...(gateways.ok ? gateways.objects || [] : []),
-      ...(clusters.ok ? clusters.objects || [] : [])
+      ...gatewayInventory.simpleGateways,
+      ...gatewayInventory.clusters
     ],
-    error: gateways.error || clusters.error
+    error: gatewayInventory.error
   };
   const jumboHotfixTargets = {
-    ok: gateways.ok || clusters.ok,
+    ok: gatewayInventory.ok,
     objects: [
-      ...(gateways.ok ? gateways.objects || [] : []),
-      ...(clusters.ok ? clusters.objects || [] : [])
+      ...gatewayInventory.simpleGateways,
+      ...gatewayInventory.clusters
     ],
-    error: gateways.error || clusters.error
+    error: gatewayInventory.error
   };
+  const eligibleSimpleGateways = { ok: gatewayInventory.ok, objects: gatewayInventory.simpleGateways, error: gatewayInventory.error };
   const gaiaTargets = { ok: gatewayInventory.ok, objects: gatewayInventory.runScriptTargets, error: gatewayInventory.error };
   const policyTargets = { ok: gatewayInventory.ok, objects: gatewayInventory.policyTargets, error: gatewayInventory.error };
   const topologyTargets = { ok: gatewayInventory.ok, objects: gatewayInventory.topologyObjects, error: gatewayInventory.error };
@@ -7207,7 +7349,7 @@ async function scanHardening(session) {
     skipManagementPlaneProtection ? Promise.resolve(null) : collectAdministrativeSourceIpEvidence(session, gatewaysAndServers, packages, networks, addressRanges),
     collectActiveDirectoryIntegrationEvidence(session, adGatewayObjects),
     collectJumboHotfixEvidence(session, jumboHotfixTargets),
-    collectCveIkeEvidence(session, globalProperties, gateways),
+    collectCveIkeEvidence(session, globalProperties, eligibleSimpleGateways),
     collectGaiaFullScanEvidence(session, gaiaTargets, gatewaysAndServers),
     collectGaiaManagementExternalSyslogEvidence(session, gatewaysAndServers),
     collectSecurityFeatureUsageEvidence(session, gaiaTargets),
@@ -7237,6 +7379,7 @@ async function scanHardening(session) {
     ...evaluateGlobalProperties(globalProperties, session),
     evaluateJumboHotfixAccumulator(jumboHotfixEvidence, session),
     evaluateGatewayStealthRules(gatewayStealthRules, session),
+    evaluateGatewayObjectStatus(gatewaySicStatus),
     evaluateActiveDirectoryIntegrationAccounts(activeDirectoryIntegrations, session),
     evaluateCloudControllerIntegrations(dataCenterServers, session),
     evaluateGaiaAllowedHostAccess(gaiaAllowedHostAccess, session),
@@ -7290,6 +7433,7 @@ async function scanHardening(session) {
       "show-networks": networks.ok ? "ok" : networks.error,
       "show-address-ranges": addressRanges.ok ? "ok" : addressRanges.error,
       "gateway-inventory": gatewayInventory.ok ? "ok" : gatewayInventory.error,
+      "mgmt_cli/test-sic-status": gatewaySicStatus.ok ? "ok" : { error: `${gatewaySicStatus.rows?.length || 0} gateway object${(gatewaySicStatus.rows?.length || 0) === 1 ? " is" : "s are"} not communicating` },
       ...(skipManagementPlaneProtection ? {} : {
         "run-script/management-firewall": managementFirewallProtection.ok ? "ok" : { error: `${managementFirewallProtection.errors?.length || 0} lookup error${(managementFirewallProtection.errors?.length || 0) === 1 ? "" : "s"}` }
       }),
