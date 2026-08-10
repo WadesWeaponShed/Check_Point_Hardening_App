@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Check Point Hardening App - Single Use Public Edition</title>
-    <link rel="stylesheet" href="/styles.css?v=20260808-mora-mode">
+    <link rel="stylesheet" href="/styles.css?v=20260810-all-domain-mode">
   </head>
   <body>
     <main class="app">
@@ -22,15 +22,16 @@
 
         <form id="loginForm" class="grid-form">
           <div id="moraModeBanner" class="mora-mode-banner full-row hidden" role="status">
-            <strong>Welcome to Mor-a Mode</strong>
-            <span>MDS discovery will scan every active domain sequentially. The Domain field is not required.</span>
+            <strong>All Domain Scan Without Remediation</strong>
+            <span>Every active MDS domain will be scanned sequentially. The Domain field is not required.</span>
           </div>
           <label class="full-row">
             Management Host Type
             <select id="managementType" name="managementType">
               <option value="sms" selected>Security Management Server (SMS)</option>
               <option value="smart1-cloud">Smart-1 Cloud</option>
-              <option value="mds">Multi-Domain Server (MDS)</option>
+              <option value="mds">Multi-Domain Server (MDS) - Single Domain w/Remediation</option>
+              <option value="mds-all">Multi-Domain Server (MDS) - All Domain Scan w/o Remediation</option>
             </select>
           </label>
           <label class="full-row">
@@ -245,6 +246,6 @@
         </form>
       </section>
     </div>
-    <script src="/app.js?v=20260808-mora-mode"></script>
+    <script src="/app.js?v=20260810-all-domain-mode"></script>
   </body>
 </html>

@@ -140,7 +140,7 @@ function renderScanProgress(progress = {}) {
   scanStatus.innerHTML = `
     <div class="scan-progress-head">
       ${progress.failed ? "" : '<span class="spinner" aria-hidden="true"></span>'}
-      <strong>${escapeHtml(progress.failed ? "Scan failed" : progress.complete ? "Scan complete" : domainProgress ? "Scanning Mor-a Mode domains..." : "Scanning hardening posture...")}</strong>
+      <strong>${escapeHtml(progress.failed ? "Scan failed" : progress.complete ? "Scan complete" : domainProgress ? (moraModeEnabled ? "Scanning Mor-a Mode domains..." : "Scanning all MDS domains...") : "Scanning hardening posture...")}</strong>
       <span>${escapeHtml(`${domainProgress ? `${domainProgress} - ` : ""}${progress.completedSteps || 0} command${Number(progress.completedSteps || 0) === 1 ? "" : "s"} completed`)}</span>
     </div>
     <div class="scan-progress-meter" aria-label="Scan progress">
@@ -315,9 +315,8 @@ function updateAuthMode() {
 }
 
 function enableMoraMode() {
-  if (moraModeEnabled) return;
   moraModeEnabled = true;
-  managementTypeInput.value = "mds";
+  managementTypeInput.value = "mds-all";
   mdsScanInput.checked = true;
   smart1CloudInput.checked = false;
   domainInput.value = "";
@@ -332,20 +331,31 @@ function enableMoraMode() {
   `);
 }
 
+function allDomainScanSelected() {
+  return managementTypeInput.value === "mds-all";
+}
+
 function updateManagementType() {
   const managementType = managementTypeInput.value || "sms";
-  const isMds = managementType === "mds";
+  const isAllDomainMds = managementType === "mds-all";
+  const isMds = managementType === "mds" || isAllDomainMds;
   const isSmart1Cloud = managementType === "smart1-cloud";
-  const useMoraMode = moraModeEnabled && isMds;
   mdsScanInput.checked = isMds;
   smart1CloudInput.checked = isSmart1Cloud;
   hostInput.placeholder = isSmart1Cloud
     ? "tenant.example.maas.checkpoint.com/context/web_api"
     : "Hostname or IP Address";
-  domainField.classList.toggle("hidden", !isMds || useMoraMode);
+  domainField.classList.toggle("hidden", !isMds || isAllDomainMds);
   managementObjectField.classList.toggle("hidden", !isMds);
-  domainInput.required = isMds && !useMoraMode;
+  domainInput.required = isMds && !isAllDomainMds;
   managementObjectNameInput.required = isMds;
+  moraModeBanner.classList.toggle("hidden", !isAllDomainMds);
+  if (isAllDomainMds) {
+    moraModeBanner.querySelector("strong").textContent = moraModeEnabled ? "Welcome to Mor-a Mode" : "All Domain Scan Without Remediation";
+    moraModeBanner.querySelector("span").textContent = moraModeEnabled
+      ? "MDS discovery will scan every active domain sequentially. The Domain field is not required."
+      : "Every active MDS domain will be scanned sequentially. The Domain field is not required, and remediation controls are disabled.";
+  }
   if (!isMds) {
     domainInput.value = "";
     managementObjectNameInput.value = "";
@@ -353,7 +363,9 @@ function updateManagementType() {
 }
 
 function updateMdsMode() {
-  managementTypeInput.value = mdsScanInput.checked ? "mds" : (smart1CloudInput.checked ? "smart1-cloud" : "sms");
+  managementTypeInput.value = mdsScanInput.checked
+    ? (allDomainScanSelected() ? "mds-all" : "mds")
+    : (smart1CloudInput.checked ? "smart1-cloud" : "sms");
   updateManagementType();
 }
 
@@ -382,9 +394,10 @@ function updateReauthMode() {
 
 function updateReauthMdsMode() {
   const enabled = reauthMdsScanInput.checked;
-  reauthDomainField.classList.toggle("hidden", !enabled || moraModeEnabled);
+  const allDomains = allDomainScanSelected();
+  reauthDomainField.classList.toggle("hidden", !enabled || allDomains);
   reauthManagementObjectField.classList.toggle("hidden", !enabled);
-  reauthDomainInput.required = enabled && !moraModeEnabled;
+  reauthDomainInput.required = enabled && !allDomains;
   reauthManagementObjectNameInput.required = enabled;
   if (!enabled) {
     reauthDomainInput.value = "";
@@ -1480,7 +1493,7 @@ async function exportHardeningChecksPdf() {
     const link = document.createElement("a");
     link.href = url;
     link.download = hardeningScan.moraMode
-      ? "mora-mode-domain-hardening-reports.zip"
+      ? "all-domain-hardening-reports.zip"
       : "check-point-best-practices-hardening-report.pdf";
     document.body.append(link);
     link.click();
@@ -2048,7 +2061,7 @@ loginForm.addEventListener("submit", async (event) => {
     const form = new FormData(loginForm);
     const authMode = form.get("authMode") || "password";
     const mdsScan = form.get("mdsScan") === "on";
-    const moraMode = moraModeEnabled && mdsScan;
+    const moraMode = allDomainScanSelected() && mdsScan;
     const result = await api("/api/login", {
       host: form.get("host"),
       port: form.get("port"),
@@ -2065,7 +2078,8 @@ loginForm.addEventListener("submit", async (event) => {
       largeEnvironmentMode: form.get("largeEnvironmentMode") === "on"
     });
     sessionId = result.sessionId;
-    const modeLabel = result.moraMode ? ` in Mor-a Mode (${result.domains?.filter((domain) => domain.available).length || 0} active domains ready)` : "";
+    const allDomainLabel = moraModeEnabled ? "Mor-a Mode" : "MDS All Domain Scan";
+    const modeLabel = result.moraMode ? ` in ${allDomainLabel} (${result.domains?.filter((domain) => domain.available).length || 0} active domains ready)` : "";
     connectionLabel.textContent = `Connected to ${result.baseUrl} as ${result.user}${modeLabel}`;
     setLoginStatus(`Connected to ${result.baseUrl} as ${result.user}${modeLabel}.`, "connected");
     setDiagnostics({
@@ -2075,7 +2089,9 @@ loginForm.addEventListener("submit", async (event) => {
     });
     loginPanel.classList.add("hidden");
     workspace.classList.remove("hidden");
-    addNotice(result.moraMode ? "Welcome to Mor-a Mode. Run a scan to process active domains sequentially." : "Login succeeded. Run a hardening scan when ready.", "success");
+    addNotice(result.moraMode
+      ? (moraModeEnabled ? "Welcome to Mor-a Mode. Run a scan to process active domains sequentially." : "All-domain login succeeded. Run a scan to process active domains sequentially without remediation.")
+      : "Login succeeded. Run a hardening scan when ready.", "success");
   } catch (error) {
     sessionId = "";
     connectionLabel.textContent = "Not connected";
@@ -2128,7 +2144,7 @@ reauthForm.addEventListener("submit", async (event) => {
     const form = new FormData(reauthForm);
     const authMode = form.get("authMode") || "password";
     const mdsScan = form.get("mdsScan") === "on";
-    const moraMode = moraModeEnabled && mdsScan;
+    const moraMode = allDomainScanSelected() && mdsScan;
     const result = await api("/api/login", {
       host: form.get("host"),
       port: form.get("port"),
@@ -2150,7 +2166,7 @@ reauthForm.addEventListener("submit", async (event) => {
     smart1CloudInput.checked = form.get("smart1Cloud") === "on";
     mdsScanInput.checked = mdsScan;
     managementTypeInput.value = mdsScan
-      ? "mds"
+      ? (moraMode ? "mds-all" : "mds")
       : (smart1CloudInput.checked ? "smart1-cloud" : "sms");
     document.querySelector("#domain").value = mdsScan ? (form.get("domain") || "") : "";
     document.querySelector("#managementObjectName").value = mdsScan ? (form.get("managementObjectName") || "") : "";

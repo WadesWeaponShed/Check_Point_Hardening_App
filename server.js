@@ -227,7 +227,7 @@ async function generateMoraDomainReportsZip(session) {
   const scan = session.lastHardeningScan;
   const domains = Array.isArray(scan?.domains) ? scan.domains.filter((domain) => domain.scan?.checks?.length) : [];
   if (!scan?.moraMode || !domains.length) {
-    throw enrichError(new Error("Run a successful Mor-a Mode scan before exporting domain reports."), {
+    throw enrichError(new Error("Run a successful all-domain MDS scan before exporting domain reports."), {
       phase: "report-scan"
     });
   }
@@ -574,7 +574,7 @@ async function login(payload) {
   const moraMode = payload.moraMode === true || payload.moraMode === "true" || payload.moraMode === "on";
   const mdsMode = moraMode || payload.mdsScan === true || payload.mdsScan === "true" || payload.mdsScan === "on" || Boolean(String(payload.managementObjectName || "").trim());
   if (moraMode && smart1Cloud) {
-    throw new Error("Mor-a Mode requires a Multi-Domain Server and cannot be used with Smart-1 Cloud.");
+    throw new Error("All-domain scanning requires a Multi-Domain Server and cannot be used with Smart-1 Cloud.");
   }
   log("Login request received", {
     target: `${cpApiUrl({ baseUrl, smart1Cloud }, "login").origin}${cpApiUrl({ baseUrl, smart1Cloud }, "login").pathname}`,
@@ -683,7 +683,7 @@ async function login(payload) {
     const inventorySession = { ...session, sid: mdsSid || loginResult.sid };
     const discoveredDomains = await discoverMoraDomains(inventorySession);
     if (!discoveredDomains.length) {
-      throw new Error("Mor-a Mode did not find any active MDS domains available to this administrator.");
+      throw new Error("The all-domain scan did not find any active MDS domains available to this administrator.");
     }
     for (const domain of discoveredDomains) {
       try {
@@ -7524,7 +7524,7 @@ function mergeScanSummaries(domainResults = []) {
 async function scanMoraHardening(session) {
   const domains = Array.isArray(session.moraDomains) ? session.moraDomains : [];
   if (!domains.length) {
-    throw new Error("Mor-a Mode has no discovered domains. Log in again and retry.");
+    throw new Error("The all-domain scan has no discovered domains. Log in again and retry.");
   }
   const startedAt = new Date().toISOString();
   session.scanProgress = {
@@ -9955,7 +9955,7 @@ async function handleApi(req, res) {
         const archive = await generateMoraDomainReportsZip(session);
         res.writeHead(200, {
           "content-type": "application/zip",
-          "content-disposition": `attachment; filename="mora-mode-domain-hardening-reports.zip"`,
+          "content-disposition": `attachment; filename="all-domain-hardening-reports.zip"`,
           "content-length": archive.length
         });
         res.end(archive);
