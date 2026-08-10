@@ -223,6 +223,10 @@ function safeReportFilename(value) {
     .slice(0, 100) || "domain";
 }
 
+function customerReportPrefix(value) {
+  return String(value || "").trim() ? `${safeReportFilename(value)}-` : "";
+}
+
 async function generateMoraDomainReportsZip(session) {
   const scan = session.lastHardeningScan;
   const domains = Array.isArray(scan?.domains) ? scan.domains.filter((domain) => domain.scan?.checks?.length) : [];
@@ -232,13 +236,14 @@ async function generateMoraDomainReportsZip(session) {
     });
   }
   const zip = new JSZip();
+  const customerPrefix = customerReportPrefix(scan.customerName);
   for (const domain of domains) {
     const report = await generateHardeningReportPdfFromScan({
       ...domain.scan,
       reportDomainName: domain.name
     });
     try {
-      zip.file(`${safeReportFilename(domain.name)}-hardening-report.pdf`, report.file);
+      zip.file(`${customerPrefix}${safeReportFilename(domain.name)}-hardening-report.pdf`, report.file);
     } finally {
       await report.cleanup();
     }
@@ -593,7 +598,8 @@ async function login(payload) {
     mdsMode,
     moraMode,
     domain: moraMode ? "" : String(payload.domain || "").trim(),
-    managementObjectName: String(payload.managementObjectName || "").trim()
+    managementObjectName: String(payload.managementObjectName || "").trim(),
+    customerName: String(payload.customerName || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160)
   };
   const authMode = payload.authMode === "api-key" ? "api-key" : "password";
   const loginBody = {};
@@ -717,6 +723,7 @@ async function login(payload) {
     smart1Cloud: session.smart1Cloud,
     mdsMode: session.mdsMode,
     moraMode,
+    customerName: session.customerName,
     managementObjectName: session.managementObjectName,
     createdAt: Date.now(),
     lastHardeningScan: null
@@ -7265,7 +7272,8 @@ async function scanHardening(session) {
   const currentScan = {
     scannedAt,
     user: session.user || "Unknown",
-    baseUrl: session.baseUrl
+    baseUrl: session.baseUrl,
+    customerName: session.customerName || ""
   };
   const skipManagementPlaneProtection = Boolean(session.smart1Cloud);
   const skipSmart1OnlyChecks = Boolean(session.smart1Cloud);
@@ -7400,6 +7408,7 @@ async function scanHardening(session) {
     scannedAt,
     user: currentScan.user,
     baseUrl: currentScan.baseUrl,
+    customerName: currentScan.customerName,
     managementObjectName: session.managementObjectName || "",
     guide: {
       title: "Check Point Gateway and Management Hardening Administration Guide",
@@ -7580,6 +7589,7 @@ async function scanMoraHardening(session) {
     scannedAt: new Date().toISOString(),
     user: session.user || "Unknown",
     baseUrl: session.baseUrl,
+    customerName: session.customerName || "",
     guide: successful[0]?.scan?.guide || {
       title: "Check Point Gateway and Management Hardening Administration Guide",
       date: "01 June 2026",
@@ -9951,11 +9961,12 @@ async function handleApi(req, res) {
     if (req.url === "/api/export-pdf" && req.method === "POST") {
       log("Local API request", { requestId, route: req.url });
       const session = getSession(payload.sessionId);
+      const customerPrefix = customerReportPrefix(session.customerName);
       if (session.moraMode) {
         const archive = await generateMoraDomainReportsZip(session);
         res.writeHead(200, {
           "content-type": "application/zip",
-          "content-disposition": `attachment; filename="all-domain-hardening-reports.zip"`,
+          "content-disposition": `attachment; filename="${customerPrefix}all-domain-hardening-reports.zip"`,
           "content-length": archive.length
         });
         res.end(archive);
@@ -9971,7 +9982,7 @@ async function handleApi(req, res) {
       });
       res.writeHead(200, {
         "content-type": "application/pdf",
-        "content-disposition": `attachment; filename="check-point-best-practices-hardening-report.pdf"`,
+        "content-disposition": `attachment; filename="${customerPrefix}check-point-best-practices-hardening-report.pdf"`,
         "content-length": result.file.length
       });
       res.end(result.file, () => {

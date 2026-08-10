@@ -8,7 +8,7 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
-const { PDFArray, PDFDict, PDFDocument, PDFName, PDFNull } = require("pdf-lib");
+const { PDFArray, PDFDict, PDFDocument, PDFName, PDFNull, StandardFonts, rgb } = require("pdf-lib");
 
 const STATUS_LABELS = {
   "remediation-required": "Remediation Recommended",
@@ -581,7 +581,47 @@ function rewriteInternalDestinations(merged, copiedBody, destinations) {
   }
 }
 
-async function mergePdfs(basePath, bodyPath, outputPath, destinations = {}) {
+function supportedCoverText(font, value) {
+  return [...String(value || "")].map((character) => {
+    try {
+      font.encodeText(character);
+      return character;
+    } catch {
+      return "?";
+    }
+  }).join("");
+}
+
+function fitCoverText(font, value, maxWidth) {
+  let text = supportedCoverText(font, value);
+  let size = 17;
+  while (size > 10 && font.widthOfTextAtSize(text, size) > maxWidth) {
+    size -= 0.5;
+  }
+  if (font.widthOfTextAtSize(text, size) <= maxWidth) return { text, size };
+  while (text.length > 4 && font.widthOfTextAtSize(`${text}...`, size) > maxWidth) {
+    text = text.slice(0, -1);
+  }
+  return { text: `${text.trimEnd()}...`, size };
+}
+
+async function addPreparedForToCover(merged, coverPage, customerName) {
+  const name = String(customerName || "").trim();
+  if (!coverPage || !name) return;
+  const font = await merged.embedFont(StandardFonts.HelveticaBold);
+  const { width, height } = coverPage.getSize();
+  const fitted = fitCoverText(font, `Prepared for: ${name}`, width * 0.74);
+  const textWidth = font.widthOfTextAtSize(fitted.text, fitted.size);
+  coverPage.drawText(fitted.text, {
+    x: (width - textWidth) / 2,
+    y: height * 0.255,
+    size: fitted.size,
+    font,
+    color: rgb(0.08, 0.13, 0.2)
+  });
+}
+
+async function mergePdfs(basePath, bodyPath, outputPath, destinations = {}, customerName = "") {
   const merged = await PDFDocument.create();
   if (!existsSync(basePath)) {
     throw new Error(`Report cover PDF not found: ${basePath}`);
@@ -589,6 +629,7 @@ async function mergePdfs(basePath, bodyPath, outputPath, destinations = {}) {
   const base = await PDFDocument.load(await readFile(basePath), { ignoreEncryption: true });
   const copiedBase = await merged.copyPages(base, base.getPageIndices());
   copiedBase.forEach((page) => merged.addPage(page));
+  await addPreparedForToCover(merged, copiedBase[0], customerName);
   const body = await PDFDocument.load(await readFile(bodyPath), { ignoreEncryption: true });
   const copiedBody = await merged.copyPages(body, body.getPageIndices());
   copiedBody.forEach((page) => merged.addPage(page));
@@ -615,7 +656,7 @@ async function main() {
   const bodyPath = join(dirname(args.output), "report-body.pdf");
   const pageSize = await basePageSize(args["base-pdf"]);
   const destinations = await renderBodyPdf(scan, bodyPath, pageSize);
-  await mergePdfs(args["base-pdf"], bodyPath, args.output, destinations);
+  await mergePdfs(args["base-pdf"], bodyPath, args.output, destinations, scan.customerName);
 }
 
 main().catch((error) => {

@@ -13,6 +13,7 @@ const loginForm = document.querySelector("#loginForm");
 const moraModeBanner = document.querySelector("#moraModeBanner");
 const managementTypeInput = document.querySelector("#managementType");
 const hostInput = document.querySelector("#host");
+const customerNameInput = document.querySelector("#customerName");
 const usernameField = document.querySelector("#usernameField");
 const usernameInput = document.querySelector("#username");
 const smart1CloudInput = document.querySelector("#smart1Cloud");
@@ -490,6 +491,14 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function safeDownloadFilenamePart(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 100);
 }
 
 async function api(path, payload) {
@@ -1492,9 +1501,11 @@ async function exportHardeningChecksPdf() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
+    const customerPart = safeDownloadFilenamePart(hardeningScan.customerName);
+    const customerPrefix = customerPart ? `${customerPart}-` : "";
     link.download = hardeningScan.moraMode
-      ? "all-domain-hardening-reports.zip"
-      : "check-point-best-practices-hardening-report.pdf";
+      ? `${customerPrefix}all-domain-hardening-reports.zip`
+      : `${customerPrefix}check-point-best-practices-hardening-report.pdf`;
     document.body.append(link);
     link.click();
     link.remove();
@@ -2064,6 +2075,7 @@ loginForm.addEventListener("submit", async (event) => {
     const moraMode = allDomainScanSelected() && mdsScan;
     const result = await api("/api/login", {
       host: form.get("host"),
+      customerName: form.get("customerName"),
       port: form.get("port"),
       username: form.get("username"),
       authMode,
@@ -2147,6 +2159,7 @@ reauthForm.addEventListener("submit", async (event) => {
     const moraMode = allDomainScanSelected() && mdsScan;
     const result = await api("/api/login", {
       host: form.get("host"),
+      customerName: customerNameInput.value,
       port: form.get("port"),
       username: form.get("username"),
       authMode,
