@@ -158,7 +158,7 @@ function renderDetail(label, value, options = {}) {
   return `
     <div class="detail-row">
       <dt>${escapeHtml(label)}</dt>
-      <dd class="${options.critical ? "critical-detail" : ""}">${content}</dd>
+      <dd class="${options.tone === "success" ? "positive-detail" : (options.critical ? "critical-detail" : "")}">${content}</dd>
     </div>
   `;
 }
@@ -258,7 +258,7 @@ function renderCheck(check) {
       <dl class="check-details">
         ${renderDetail("Recommendation", check.recommendation)}
         ${renderWarning(check.recommendationWarning)}
-        ${!evidenceTables.length ? renderDetail("Evidence", check.evidence) : ""}
+        ${!evidenceTables.length ? renderDetail("Evidence", check.evidence, { tone: check.evidenceTone }) : ""}
         ${renderDetail("Details", check.details, { critical: check.detailTone === "critical", link: check.detailsLink })}
         ${renderWarning(check.detailsWarning)}
         ${renderDetailRows(check.detailRows)}
@@ -605,23 +605,30 @@ function fitCoverText(font, value, maxWidth) {
   return { text: `${text.trimEnd()}...`, size };
 }
 
-async function addPreparedForToCover(merged, coverPage, customerName) {
+async function addReportIdentityToCover(merged, coverPage, customerName, domainName) {
   const name = String(customerName || "").trim();
-  if (!coverPage || !name) return;
+  const domain = String(domainName || "").trim();
+  if (!coverPage || (!name && !domain)) return;
   const font = await merged.embedFont(StandardFonts.HelveticaBold);
   const { width, height } = coverPage.getSize();
-  const fitted = fitCoverText(font, `Prepared for: ${name}`, width * 0.74);
-  const textWidth = font.widthOfTextAtSize(fitted.text, fitted.size);
-  coverPage.drawText(fitted.text, {
-    x: (width - textWidth) / 2,
-    y: height * 0.255,
-    size: fitted.size,
-    font,
-    color: rgb(0.08, 0.13, 0.2)
+  const lines = [
+    ...(name ? [`Prepared for: ${name}`] : []),
+    ...(domain ? [`Domain: ${domain}`] : [])
+  ];
+  lines.forEach((line, index) => {
+    const fitted = fitCoverText(font, line, width * 0.74);
+    const textWidth = font.widthOfTextAtSize(fitted.text, fitted.size);
+    coverPage.drawText(fitted.text, {
+      x: (width - textWidth) / 2,
+      y: height * (0.255 - index * 0.035),
+      size: fitted.size,
+      font,
+      color: rgb(0.08, 0.13, 0.2)
+    });
   });
 }
 
-async function mergePdfs(basePath, bodyPath, outputPath, destinations = {}, customerName = "") {
+async function mergePdfs(basePath, bodyPath, outputPath, destinations = {}, customerName = "", domainName = "") {
   const merged = await PDFDocument.create();
   if (!existsSync(basePath)) {
     throw new Error(`Report cover PDF not found: ${basePath}`);
@@ -629,7 +636,7 @@ async function mergePdfs(basePath, bodyPath, outputPath, destinations = {}, cust
   const base = await PDFDocument.load(await readFile(basePath), { ignoreEncryption: true });
   const copiedBase = await merged.copyPages(base, base.getPageIndices());
   copiedBase.forEach((page) => merged.addPage(page));
-  await addPreparedForToCover(merged, copiedBase[0], customerName);
+  await addReportIdentityToCover(merged, copiedBase[0], customerName, domainName);
   const body = await PDFDocument.load(await readFile(bodyPath), { ignoreEncryption: true });
   const copiedBody = await merged.copyPages(body, body.getPageIndices());
   copiedBody.forEach((page) => merged.addPage(page));
@@ -656,7 +663,7 @@ async function main() {
   const bodyPath = join(dirname(args.output), "report-body.pdf");
   const pageSize = await basePageSize(args["base-pdf"]);
   const destinations = await renderBodyPdf(scan, bodyPath, pageSize);
-  await mergePdfs(args["base-pdf"], bodyPath, args.output, destinations, scan.customerName);
+  await mergePdfs(args["base-pdf"], bodyPath, args.output, destinations, scan.customerName, scan.reportDomainName);
 }
 
 main().catch((error) => {

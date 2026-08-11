@@ -1365,6 +1365,12 @@ summary {
   font-weight: 900;
 }
 
+.check-details dd.positive-detail,
+.check-details .positive-detail {
+  color: var(--ok);
+  font-weight: 900;
+}
+
 .evidence-table td.critical-detail {
   color: #c1121f;
   font-weight: 900;

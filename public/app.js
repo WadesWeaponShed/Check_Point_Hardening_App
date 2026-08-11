@@ -417,7 +417,8 @@ function renderDetails(details = {}, options = {}) {
   return Object.entries(details)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
     .map(([key, value]) => {
-      const classes = key === "Details" && options.detailTone === "critical" ? "critical-detail" : "";
+      const tone = key === "Details" ? options.detailTone : (key === "Evidence" ? options.evidenceTone : "");
+      const classes = tone === "critical" ? "critical-detail" : (tone === "success" ? "positive-detail" : "");
       let content = escapeHtml(String(value));
       if (key === "Details" && options.detailLink?.url) {
         const label = escapeHtml(options.detailLink.label || options.detailLink.url);
@@ -1249,7 +1250,7 @@ function renderCheckGroupsMarkup(checks = []) {
                 "Recommendation": check.recommendation,
                 ...(check.evidenceTable || check.evidenceTables ? {} : { "Evidence": check.evidence }),
                 "Details": check.details
-              }, { detailTone: check.detailTone, detailLink: check.detailsLink, detailWarning: check.detailsWarning, recommendationWarning: check.recommendationWarning })}
+              }, { evidenceTone: check.evidenceTone, detailTone: check.detailTone, detailLink: check.detailsLink, detailWarning: check.detailsWarning, recommendationWarning: check.recommendationWarning })}
               ${renderDetailRows(check.detailRows)}
               ${renderSpecialConsiderations(check.specialConsiderations)}
               ${renderDetails({ "Guide section": check.source })}</dl>
@@ -1503,9 +1504,12 @@ async function exportHardeningChecksPdf() {
     link.href = url;
     const customerPart = safeDownloadFilenamePart(hardeningScan.customerName);
     const customerPrefix = customerPart ? `${customerPart}-` : "";
+    const domainPart = safeDownloadFilenamePart(hardeningScan.reportDomainName);
     link.download = hardeningScan.moraMode
       ? `${customerPrefix}all-domain-hardening-reports.zip`
-      : `${customerPrefix}check-point-best-practices-hardening-report.pdf`;
+      : (domainPart
+        ? `${customerPrefix}${domainPart}-hardening-report.pdf`
+        : `${customerPrefix}check-point-best-practices-hardening-report.pdf`);
     document.body.append(link);
     link.click();
     link.remove();

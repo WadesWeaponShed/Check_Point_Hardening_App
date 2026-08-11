@@ -22,6 +22,7 @@ const LARGE_ENV_API_CONCURRENCY = positiveIntegerEnv("LARGE_ENV_API_CONCURRENCY"
 const LARGE_ENV_TASK_POLL_INTERVAL_MS = positiveIntegerEnv("LARGE_ENV_TASK_POLL_INTERVAL_MS", 1250);
 const TASK_POLL_ATTEMPTS = positiveIntegerEnv("TASK_POLL_ATTEMPTS", 20);
 const TASK_POLL_INTERVAL_MS = positiveIntegerEnv("TASK_POLL_INTERVAL_MS", 1000);
+const TASK_POLL_MAX_INTERVAL_MS = positiveIntegerEnv("TASK_POLL_MAX_INTERVAL_MS", 4000);
 const CP_API_TIMEOUT_MS = positiveIntegerEnv("CP_API_TIMEOUT_MS", 45_000);
 const CP_LOG_API_TIMEOUT_MS = positiveIntegerEnv("CP_LOG_API_TIMEOUT_MS", 120_000);
 const CP_VPN_API_TIMEOUT_MS = positiveIntegerEnv("CP_VPN_API_TIMEOUT_MS", 120_000);
@@ -225,6 +226,14 @@ function safeReportFilename(value) {
 
 function customerReportPrefix(value) {
   return String(value || "").trim() ? `${safeReportFilename(value)}-` : "";
+}
+
+function singleReportFilename(scan = {}) {
+  const customerPrefix = customerReportPrefix(scan.customerName);
+  const domainName = String(scan.reportDomainName || "").trim();
+  return domainName
+    ? `${customerPrefix}${safeReportFilename(domainName)}-hardening-report.pdf`
+    : `${customerPrefix}check-point-best-practices-hardening-report.pdf`;
 }
 
 async function generateMoraDomainReportsZip(session) {
@@ -1018,7 +1027,7 @@ function impliedRuleDescription(key) {
   return match ? match[1] : "";
 }
 
-function makeCheck({ id, category, title, recommendation, recommendationWarning = "", status, severity = "medium", evidence = "", evidenceTable = null, evidenceTables = null, details = "", detailsLink = null, detailsWarning = "", detailRows = null, specialConsiderations = null, source = "", commands = [], remediation = null, detailTone = "", review = null, hideBadges = false }) {
+function makeCheck({ id, category, title, recommendation, recommendationWarning = "", status, severity = "medium", evidence = "", evidenceTone = "", evidenceTable = null, evidenceTables = null, details = "", detailsLink = null, detailsWarning = "", detailRows = null, specialConsiderations = null, source = "", commands = [], remediation = null, detailTone = "", review = null, hideBadges = false }) {
   return {
     id,
     category,
@@ -1028,6 +1037,7 @@ function makeCheck({ id, category, title, recommendation, recommendationWarning 
     status,
     severity,
     evidence,
+    evidenceTone,
     evidenceTable,
     evidenceTables,
     details,
@@ -2028,23 +2038,13 @@ function gatewayServerInventory(gatewaysAndServersResult, fallbackGatewaysResult
   };
 }
 
-function shellSingleQuote(value) {
-  return `'${String(value ?? "").replaceAll("'", `'"'"'`)}'`;
-}
-
 function gatewayObjectIpAddress(gateway = {}) {
   return gateway["ipv4-address"] || gateway.ipv4Address || gateway["ip-address"] || gateway.ipAddress
     || firstIpv4(allIpv4Values(gateway).join(" ")) || "Not returned";
 }
 
-function parseSicStatusMessage(output, gatewayName) {
-  const text = String(output || "").trim();
-  const line = text.split(/\r?\n/).find((entry) => /^\s*sic-message\s*:/i.test(entry));
-  const rawMessage = line
-    ? line.replace(/^\s*sic-message\s*:\s*/i, "").trim().replace(/^(["'])(.*)\1$/, "$2")
-    : text;
-  const statusMatch = rawMessage.match(/SIC\s+Status\s+for\s+.+?:\s*(.+?)\s*$/i);
-  const rawStatus = (statusMatch?.[1] || rawMessage || "Unknown").trim();
+function normalizedGatewaySicStatus(gateway = {}) {
+  const rawStatus = gateway["sic-status"] ?? gateway.sicStatus ?? "unknown";
   const statusToken = normalizeToken(rawStatus);
   const statusLabels = new Map([
     ["uninitialized", "Uninitialized"],
@@ -2055,16 +2055,12 @@ function parseSicStatusMessage(output, gatewayName) {
     ["waitingforfirstconnection", "Waiting For First Connection"],
     ["communicating", "Communicating"]
   ]);
-  const status = statusLabels.get(statusToken) || "Unknown";
-  return {
-    message: rawMessage || `SIC Status for ${gatewayName}: No status returned`,
-    status,
-    communicating: status === "Communicating"
-  };
+  return statusLabels.get(statusToken) || "Unknown";
 }
 
-async function collectGatewaySicStatusEvidence(session, gatewayInventory, gatewaysAndServersResult) {
-  const management = resolveManagementRunScriptTarget(session, gatewaysAndServersResult);
+function collectGatewaySicStatusEvidence(gatewayInventory) {
+  // Management server objects are intentionally excluded: SIC status is only
+  // relevant here for gateways and cluster members that will be scanned.
   const targets = [...(gatewayInventory.simpleGateways || []), ...(gatewayInventory.clusterMembers || [])];
   const seen = new Set();
   const uniqueTargets = targets.filter((gateway) => {
@@ -2073,34 +2069,11 @@ async function collectGatewaySicStatusEvidence(session, gatewayInventory, gatewa
     seen.add(key);
     return true;
   });
-  if (!management.name) {
-    return {
-      ok: false,
-      command: "mgmt_cli -r true test-sic-status",
-      rows: uniqueTargets.map((gateway) => ({
-        "Object Name": gateway.name || gateway.NAME || gateway.uid || "Unknown gateway",
-        "Object IP-Address": gatewayObjectIpAddress(gateway),
-        "SIC Status": "Failed"
-      })),
-      blockedKeys: new Set(uniqueTargets.flatMap((gateway) => [gateway.uid, normalizeToken(gateway.name || gateway.NAME || "")]).filter(Boolean)),
-      results: []
-    };
-  }
-
-  const results = await Promise.all(uniqueTargets.map(async (gateway) => {
+  const results = uniqueTargets.map((gateway) => {
     const name = gateway.name || gateway.NAME || gateway.uid || "";
-    const domainOption = session?.mdsMode && session?.domain ? ` -d ${shellSingleQuote(session.domain)}` : "";
-    const command = `mgmt_cli -r true${domainOption} test-sic-status name ${shellSingleQuote(name)}`;
-    const result = await runScriptWithTaskDetails(mdsRunScriptSession(session, management), {
-      "script-name": `test SIC status - ${name}`,
-      targets: [management.name],
-      script: command
-    });
-    const parsed = result.ok
-      ? parseSicStatusMessage(runScriptOutputText(result), name)
-      : { message: runScriptDisplayError(result, "SIC status lookup failed"), status: "Failed", communicating: false };
-    return { gateway, name, command, result, ...parsed };
-  }));
+    const status = normalizedGatewaySicStatus(gateway);
+    return { gateway, name, status, communicating: status === "Communicating" };
+  });
 
   const nonCommunicating = results.filter((result) => !result.communicating);
   const blockedKeys = new Set(nonCommunicating.flatMap(({ gateway }) => [
@@ -2109,7 +2082,7 @@ async function collectGatewaySicStatusEvidence(session, gatewayInventory, gatewa
   ]).filter(Boolean));
   return {
     ok: nonCommunicating.length === 0,
-    command: "mgmt_cli -r true test-sic-status name <gateway-or-cluster-member>",
+    command: "show-gateways-and-servers: sic-status",
     rows: nonCommunicating.map(({ gateway, name, status }) => ({
       "Object Name": name,
       "Object IP-Address": gatewayObjectIpAddress(gateway),
@@ -2171,33 +2144,29 @@ async function collectJumboHotfixEvidence(session, gatewaysResult) {
   }
 
   const errors = [];
-  const rows = await Promise.all(gateways.map(async (gateway) => {
+  const gatewayNames = gateways.map((gateway) => gateway.name || gateway.NAME || gateway.uid || "").filter(Boolean);
+  const batchResult = await tryCommand(session, "show-software-packages-per-targets", { targets: gatewayNames });
+  const returnedTargets = batchResult.ok && Array.isArray(batchResult.data?.targets) ? [...batchResult.data.targets] : [];
+  const returnedKeys = new Set(returnedTargets.flatMap((target) => [target.uid, normalizeToken(target.name || "")]).filter(Boolean));
+  const missingGateways = gateways.filter((gateway) => (
+    !returnedKeys.has(gateway.uid) && !returnedKeys.has(normalizeToken(gateway.name || gateway.NAME || gateway.uid || ""))
+  ));
+  if (missingGateways.length) {
+    const fallbackResults = await Promise.all(missingGateways.map(async (gateway) => {
+      const gatewayName = gateway.name || gateway.NAME || gateway.uid || "";
+      const fallback = await tryCommand(session, "show-software-packages-per-targets", { targets: [gatewayName] });
+      const target = fallback.ok && Array.isArray(fallback.data?.targets) ? fallback.data.targets[0] : null;
+      if (!target) errors.push({ gateway: gatewayName, error: fallback.error || batchResult.error || { error: "No software package data returned." } });
+      return target;
+    }));
+    returnedTargets.push(...fallbackResults.filter(Boolean));
+  }
+  const rows = gateways.map((gateway) => {
     const gatewayName = gateway.name || gateway.NAME || gateway.uid || "";
-    if (!gatewayName) {
-      return {
-        "Name of Gateway": "Gateway Returns No Data",
-        "Currently Installed Version": "Gateway Returns No Data",
-        "Available Recommended Update": "Gateway Returns No Data",
-        "Category": "Gateway Returns No Data",
-        "Recommended Upgrade Package": "Gateway Returns No Data"
-      };
-    }
-    const result = await tryCommand(session, "show-software-packages-per-targets", {
-      targets: [gatewayName]
-    });
-    if (!result.ok) {
-      errors.push({ gateway: gatewayName, error: result.error });
-      return {
-        "Name of Gateway": gatewayName || "Gateway Returns No Data",
-        "Currently Installed Version": gatewayInstalledVersion(gateway),
-        "Available Recommended Update": "Gateway Returns No Data",
-        "Category": "Gateway Returns No Data",
-        "Recommended Upgrade Package": "Gateway Returns No Data"
-      };
-    }
-    const target = Array.isArray(result.data?.targets)
-      ? result.data.targets.find((item) => item.name === gatewayName) || result.data.targets[0]
-      : null;
+    const target = returnedTargets.find((item) => (
+      normalizeToken(item.name || item.uid) === normalizeToken(gatewayName) ||
+      (gateway.uid && item.uid === gateway.uid)
+    ));
     const packages = target?.packages;
     if (!target || !packages) {
       return {
@@ -2219,7 +2188,7 @@ async function collectJumboHotfixEvidence(session, gatewaysResult) {
       "Category": recommendedPackage ? packageCategoryLabel(recommendedPackage.category) : "N/A",
       "Recommended Upgrade Package": recommendedPackage?.["package-id"] || recommendedPackage?.packageId || "N/A"
     };
-  }));
+  });
 
   return {
     ok: errors.length === 0,
@@ -2827,7 +2796,8 @@ function gaiaRunScriptTargets(session, gatewaysResult, gatewaysAndServersResult)
         targets.push({
           name: gatewayName,
           uid: gateway.uid || "",
-          title: `Gateway Name: ${gatewayName}`
+          title: `Gateway Name: ${gatewayName}`,
+          gateway
         });
       });
   } else {
@@ -3509,7 +3479,13 @@ function gaiaCombinedCollectionScript() {
     "  [ -n \"$snmp_user\" ] || continue",
     "  printf '\\n__CPBPS_SNMP_USM_USER__ %s\\n' \"$snmp_user\"",
     "  clish -c \"show snmp usm user $snmp_user\"",
-    "done"
+    "done",
+    "printf '\n__CPBPS_LICENSE_STATUS__\n'",
+    "clish -c 'show license status'",
+    "printf '\n__CPBPS_CPSTAT_MEMORY__\n'",
+    "cpstat os -f memory",
+    "printf '\n__CPBPS_CPSTAT_CPU__\n'",
+    "cpstat os -f cpu"
   ].join("\n");
 }
 
@@ -3673,7 +3649,10 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
       administratorSettings: { ...empty, command: "run-script/show-users" },
       passwordPolicy: { ...empty, command: "run-script/show-password-controls" },
       snmpMonitoring: { ...empty, command: "run-script/show-snmp" },
-      systemLogging: { ok: false, command: "run-script/show-syslog-cplogs", error, rows: [], errors }
+      systemLogging: { ok: false, command: "run-script/show-syslog-cplogs", error, rows: [], errors },
+      securityFeatureUsage: { ok: false, command: "run-script/show-license-status", error, rows: [], evidenceTables: [], errors },
+      sizingStatistics: { ok: false, command: "run-script/cpstat-os-memory-cpu", error, rows: [], errors },
+      managementExternalSyslog: { ok: false, command: "run-script/show-syslog-log-remote-addresses", error, rows: [], errors }
     };
   }
 
@@ -3682,6 +3661,12 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
   const passwordTables = [];
   const snmpTables = [];
   const syslogRows = [];
+  const licenseTableResults = [];
+  const sizingRows = [];
+  const managementSyslogRows = [];
+  const licenseErrors = [];
+  const sizingErrors = [];
+  const managementSyslogErrors = [];
   const script = gaiaCombinedCollectionScript();
 
   await Promise.all(targets.map(async (target) => {
@@ -3692,6 +3677,12 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
     });
     if (!result.ok) {
       errors.push({ target: target.name, error: result.error });
+      if (!String(target.title || "").startsWith("Management Name:")) {
+        licenseErrors.push({ target: target.name, error: result.error });
+        sizingErrors.push({ target: target.name, error: result.error });
+      } else {
+        managementSyslogErrors.push({ target: target.name, error: result.error });
+      }
       const message = runScriptDisplayError(result);
       allowedClientTables.push({ title: target.title, columns: allowedClientColumns, rows: [{ "Type": "Lookup failed", "IP Data": message }] });
       adminTables.push({ title: target.title, columns: adminColumns, rows: [gaiaLookupFailedUsersRow(message)] });
@@ -3705,6 +3696,29 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
           "External Syslog Configuration": message,
           "External Syslog Configuration Table": null
         });
+        const licenseRows = [{
+          "Object Name": target.name,
+          "License Feature": "Lookup failed",
+          "Expiration Date": message,
+          "Enabled/Disabled": "Not returned"
+        }];
+        licenseTableResults.push({ rows: licenseRows, table: {
+          title: `Gateway Name: ${target.name}`,
+          compact: true,
+          columns: ["License Feature", "Expiration Date", "Enabled/Disabled"],
+          rows: licenseRows.map((row) => ({
+            "License Feature": row["License Feature"],
+            "Expiration Date": row["Expiration Date"],
+            "Enabled/Disabled": row["Enabled/Disabled"]
+          }))
+        } });
+        sizingRows.push({
+          "Gateway": target.name,
+          "Memory Statistics": { value: message, multiline: true },
+          "CPU Statistics": { value: message, multiline: true }
+        });
+      } else {
+        managementSyslogRows.push({ "Name": target.name, "Syslog Forwarding": message });
       }
       return;
     }
@@ -3712,6 +3726,12 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
     const output = runScriptOutputText(result);
     if (gaiaOutputUnavailable(output)) {
       errors.push({ target: target.name, error: { error: GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE } });
+      if (!String(target.title || "").startsWith("Management Name:")) {
+        licenseErrors.push({ target: target.name, error: { error: GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE } });
+        sizingErrors.push({ target: target.name, error: { error: GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE } });
+      } else {
+        managementSyslogErrors.push({ target: target.name, error: { error: GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE } });
+      }
       allowedClientTables.push({ title: target.title, columns: allowedClientColumns, rows: [{ "Type": "Lookup failed", "IP Data": GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE }] });
       adminTables.push({ title: target.title, columns: adminColumns, rows: [gaiaLookupFailedUsersRow()] });
       passwordTables.push({ title: target.title, columns: passwordColumns, rows: [{ "Setting": "Lookup failed", "Value": GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE, "Check Point Recommended": "" }] });
@@ -3724,6 +3744,29 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
           "External Syslog Configuration": GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE,
           "External Syslog Configuration Table": null
         });
+        const licenseRows = [{
+          "Object Name": target.name,
+          "License Feature": "Lookup failed",
+          "Expiration Date": GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE,
+          "Enabled/Disabled": "Not returned"
+        }];
+        licenseTableResults.push({ rows: licenseRows, table: {
+          title: `Gateway Name: ${target.name}`,
+          compact: true,
+          columns: ["License Feature", "Expiration Date", "Enabled/Disabled"],
+          rows: licenseRows.map((row) => ({
+            "License Feature": row["License Feature"],
+            "Expiration Date": row["Expiration Date"],
+            "Enabled/Disabled": row["Enabled/Disabled"]
+          }))
+        } });
+        sizingRows.push({
+          "Gateway": target.name,
+          "Memory Statistics": { value: GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE, multiline: true },
+          "CPU Statistics": { value: GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE, multiline: true }
+        });
+      } else {
+        managementSyslogRows.push({ "Name": target.name, "Syslog Forwarding": GATEWAY_RUN_SCRIPT_ACCESS_MESSAGE });
       }
       return;
     }
@@ -3759,6 +3802,47 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
         "External Syslog Configuration": external.configuration,
         "External Syslog Configuration Table": external.configurationTable
       });
+      const parsedLicenseRows = parseLicenseStatusFeatures(parts.section("LICENSE_STATUS"));
+      const licenseRows = parsedLicenseRows.length
+        ? parsedLicenseRows.map((row) => ({
+          "Object Name": target.name,
+          ...row,
+          "Enabled/Disabled": licenseFeatureEnabledState(row._licenseCode, target.gateway || {})
+        }))
+        : [{
+          "Object Name": target.name,
+          "License Feature": "No license features returned",
+          "Expiration Date": "Not returned",
+          "Enabled/Disabled": "Not returned"
+        }];
+      if (!parsedLicenseRows.length) {
+        licenseErrors.push({ target: target.name, error: { error: "No license features parsed from show license status output." } });
+      }
+      licenseTableResults.push({ rows: licenseRows, table: {
+        title: `Gateway Name: ${target.name}`,
+        compact: true,
+        columns: ["License Feature", "Expiration Date", "Enabled/Disabled"],
+        rows: licenseRows.map((row) => ({
+          "License Feature": row["License Feature"],
+          "Expiration Date": row["Expiration Date"],
+          "Enabled/Disabled": row["Enabled/Disabled"]
+        })).sort((a, b) => String(a["License Feature"] || "").localeCompare(String(b["License Feature"] || "")))
+      } });
+      const memory = parts.section("CPSTAT_MEMORY");
+      const cpu = parts.section("CPSTAT_CPU");
+      if (!memory || !cpu) {
+        sizingErrors.push({ target: target.name, error: { error: "One or more cpstat sizing sections returned no data." } });
+      }
+      sizingRows.push({
+        "Gateway": target.name,
+        "Memory Statistics": { value: memory ? formatCpstatMemoryForDisplay(memory) : "No memory statistics returned", multiline: true },
+        "CPU Statistics": { value: cpu || "No CPU statistics returned", multiline: true }
+      });
+    } else {
+      managementSyslogRows.push({
+        "Name": target.name,
+        "Syslog Forwarding": gaiaManagementSyslogForwardingValue(parts.section("SYSLOG_REMOTE_ADDRESSES"))
+      });
     }
   }));
 
@@ -3768,6 +3852,12 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
   passwordTables.sort(byTitle);
   snmpTables.sort(byTitle);
   syslogRows.sort((a, b) => String(a.Name || "").localeCompare(String(b.Name || "")));
+  const licenseRows = licenseTableResults.flatMap((result) => result.rows || []).sort((a, b) => (
+    String(a["Object Name"] || "").localeCompare(String(b["Object Name"] || "")) ||
+    String(a["License Feature"] || "").localeCompare(String(b["License Feature"] || ""))
+  ));
+  const licenseTables = licenseTableResults.map((result) => result.table).filter(Boolean).sort(byTitle);
+  sizingRows.sort((a, b) => String(a.Gateway || "").localeCompare(String(b.Gateway || "")));
 
   return {
     allowedHostAccess: {
@@ -3799,6 +3889,25 @@ async function collectGaiaFullScanEvidence(session, gatewaysResult, gatewaysAndS
       command: "run-script/show-syslog-cplogs/show-syslog-log-remote-addresses",
       rows: syslogRows,
       errors
+    },
+    securityFeatureUsage: {
+      ok: licenseErrors.length === 0,
+      command: "run-script/show-license-status",
+      rows: licenseRows,
+      evidenceTables: licenseTables,
+      errors: licenseErrors
+    },
+    sizingStatistics: {
+      ok: sizingErrors.length === 0,
+      command: "run-script/cpstat-os-memory-cpu",
+      rows: sizingRows,
+      errors: sizingErrors
+    },
+    managementExternalSyslog: {
+      ok: managementSyslogErrors.length === 0,
+      command: "run-script/show-syslog-log-remote-addresses",
+      rows: managementSyslogRows,
+      errors: managementSyslogErrors
     }
   };
 }
@@ -4984,7 +5093,10 @@ async function collectGatewayStealthRuleEvidence(session, gatewaysResult, packag
     return { inspectedRulebases, foundStealthRows, fallbackErrors };
   }
 
-  if (session?.largeEnvironmentMode || session?.smart1Cloud) {
+  // Download each access layer once and evaluate gateway references locally.
+  // This preserves the evidence while avoiding per-gateway where-used expansion.
+  const useRulebaseFirst = true;
+  if (useRulebaseFirst) {
     const directRulebase = await collectFromAccessRulebases();
     errors.push(...directRulebase.fallbackErrors);
     return {
@@ -5649,7 +5761,14 @@ async function runScriptWithTaskDetailsUnqueued(session, body) {
   }
 
   let lastTaskResult = null;
+  const baseInterval = session?.largeEnvironmentMode ? LARGE_ENV_TASK_POLL_INTERVAL_MS : TASK_POLL_INTERVAL_MS;
+  const pollingStartedAt = Date.now();
+  const maxPollingMs = baseInterval * TASK_POLL_ATTEMPTS;
   for (let attempt = 0; attempt < TASK_POLL_ATTEMPTS; attempt += 1) {
+    const remainingMs = maxPollingMs - (Date.now() - pollingStartedAt);
+    if (remainingMs <= 0) break;
+    const pollDelay = Math.min(remainingMs, TASK_POLL_MAX_INTERVAL_MS, baseInterval * (attempt + 1));
+    await sleep(pollDelay);
     const taskResults = await Promise.all(taskIds.map((taskId) => tryCommand(session, "show-task", {
       "task-id": taskId,
       "details-level": "full"
@@ -5660,9 +5779,6 @@ async function runScriptWithTaskDetailsUnqueued(session, body) {
       return resultWithOutput;
     }
     lastTaskResult = okResults[0] || taskResults[0] || lastTaskResult;
-    if (attempt < TASK_POLL_ATTEMPTS - 1) {
-      await sleep(session?.largeEnvironmentMode ? LARGE_ENV_TASK_POLL_INTERVAL_MS : TASK_POLL_INTERVAL_MS);
-    }
   }
   return lastTaskResult || runResult;
 }
@@ -5872,18 +5988,19 @@ async function collectManagementFirewallEvidence(session, gatewaysAndServersResu
   }
   const managementName = management.name || managementLoginHost(session) || session.baseUrl;
   const managementRunSession = mdsRunScriptSession(session, management);
-  const interfaceScript = await runScriptWithTaskDetails(managementRunSession, {
+  const routeScript = await runScriptWithTaskDetails(managementRunSession, {
     targets: [managementName],
-    "script-name": "show route static",
-    script: "ip -o -4 addr show scope global | cut -d' ' -f7"
+    "script-name": "collect management network evidence",
+    script: [
+      "printf '\\n__CPBPS_MANAGEMENT_INTERFACES__\\n'",
+      "ip -o -4 addr show scope global | cut -d' ' -f7",
+      "printf '\\n__CPBPS_MANAGEMENT_DEFAULT_ROUTE__\\n'",
+      "netstat -rn | awk '$1 == \"0.0.0.0\" {print $2}'"
+    ].join("\n")
   });
-  const defaultRouteScript = await runScriptWithTaskDetails(managementRunSession, {
-    targets: [managementName],
-    "script-name": "show route static",
-    script: "netstat -rn | awk '$1 == \"0.0.0.0\" {print $2}'"
-  });
-  const interfaceStatus = statusDescriptionText(interfaceScript);
-  const defaultRouteStatus = statusDescriptionText(defaultRouteScript);
+  const routeParts = splitGaiaCombinedOutput(runScriptOutputText(routeScript));
+  const interfaceStatus = routeScript.ok ? routeParts.section("MANAGEMENT_INTERFACES") : statusDescriptionText(routeScript);
+  const defaultRouteStatus = routeScript.ok ? routeParts.section("MANAGEMENT_DEFAULT_ROUTE") : statusDescriptionText(routeScript);
   const managementIpMask = firstIpv4Cidr(interfaceStatus) || interfaceStatus || "Not returned";
   const defaultGatewayIp = firstIpv4(defaultRouteStatus) || "Not returned";
   let behindGateway = "";
@@ -5905,11 +6022,11 @@ async function collectManagementFirewallEvidence(session, gatewaysAndServersResu
       : "Gateway topology could not be retrieved.";
   }
   return {
-    ok: interfaceScript.ok && defaultRouteScript.ok && gatewaysResult.ok,
+    ok: routeScript.ok && gatewaysResult.ok,
     command: "run-script/show-gateways-and-servers",
     managementName,
-    interfaceScript,
-    defaultRouteScript,
+    interfaceScript: routeScript,
+    defaultRouteScript: routeScript,
     rows: [{
       "Management Server Name": managementName,
       "Management Server IP/Mask": managementIpMask,
@@ -5917,8 +6034,7 @@ async function collectManagementFirewallEvidence(session, gatewaysAndServersResu
       "Management Server Behind Gateway": behindGateway
     }],
     errors: [
-      interfaceScript.ok ? null : interfaceScript.error,
-      defaultRouteScript.ok ? null : defaultRouteScript.error,
+      routeScript.ok ? null : routeScript.error,
       gatewaysResult.ok ? null : gatewaysResult.error,
       gatewaysAndServersResult.ok ? null : gatewaysAndServersResult.error
     ].filter(Boolean)
@@ -6017,15 +6133,16 @@ function evaluateGatewayObjectStatus(result) {
       : (result.results?.length
         ? `All ${result.results.length} managed gateway and cluster member object${result.results.length === 1 ? " is" : "s are"} communicating through SIC.`
         : "No managed gateway or cluster member objects were available for SIC validation."),
+    evidenceTone: !rows.length && result.results?.length ? "success" : "",
     evidenceTable: rows.length ? {
       columns: ["Object Name", "Object IP-Address", "SIC Status"],
       rows
     } : null,
     details: rows.length
-      ? "Only objects that did not return a Communicating SIC state are shown. These objects were skipped by subsequent gateway-level checks to avoid repeated run-script failures and unnecessary scan time. Validate that an object is obsolete before deleting it."
+      ? "Only objects whose show-gateways-and-servers SIC state is not Communicating are shown. These objects were skipped by subsequent gateway-level checks to avoid unnecessary scan time. Validate that an object is obsolete before deleting it."
       : "Only gateway and cluster member objects that do not return a Communicating SIC state appear in this subsection.",
     source: "Hardening review: Decreasing Security Gateway Exposure with Policy - Gateway Object SIC Status",
-    commands: [result.command || "mgmt_cli -r true test-sic-status name <gateway-or-cluster-member>"]
+    commands: [result.command || "show-gateways-and-servers: sic-status"]
   });
 }
 
@@ -7273,7 +7390,8 @@ async function scanHardening(session) {
     scannedAt,
     user: session.user || "Unknown",
     baseUrl: session.baseUrl,
-    customerName: session.customerName || ""
+    customerName: session.customerName || "",
+    reportDomainName: session.mdsMode && session.domain ? session.domain : ""
   };
   const skipManagementPlaneProtection = Boolean(session.smart1Cloud);
   const skipSmart1OnlyChecks = Boolean(session.smart1Cloud);
@@ -7286,8 +7404,6 @@ async function scanHardening(session) {
     loginRestrictions,
     cpPasswordRequirements,
     globalProperties,
-    gateways,
-    clusters,
     packages,
     dataCenterServers,
     gatewaysAndServers,
@@ -7306,24 +7422,30 @@ async function scanHardening(session) {
     trySystemDataCommand(session, "show-login-restrictions"),
     trySystemDataCommand(session, "show-cp-password-requirements"),
     tryCommand(session, "show-global-properties", { "details-level": "full" }),
-    tryListObjects(session, "show-simple-gateways", { "details-level": "full" }),
-    tryListObjects(session, "show-simple-clusters", { "details-level": "full" }),
     tryListObjects(session, "show-packages", { "details-level": "full" }),
     tryListObjects(session, "show-data-center-servers", { "details-level": "full" }),
     tryListObjects(session, "show-gateways-and-servers", { "details-level": "full" }),
     tryListObjects(session, "show-networks", { "details-level": "full" }),
     tryListObjects(session, "show-address-ranges", { "details-level": "full" })
   ]);
-  const discoveredGatewayInventory = gatewayServerInventory(gatewaysAndServers, gateways);
-  if (!session.smart1Cloud) {
-    session.scanProgress.currentStep = "Checking gateway SIC communication before gateway scans";
+  let gateways = { ok: true, objects: [], skipped: true };
+  let clusters = { ok: true, objects: [], skipped: true };
+  if (!gatewaysAndServers.ok) {
+    [gateways, clusters] = await Promise.all([
+      tryListObjects(session, "show-simple-gateways", { "details-level": "full" }),
+      tryListObjects(session, "show-simple-clusters", { "details-level": "full" })
+    ]);
   }
-  const gatewaySicStatus = session.smart1Cloud
-    ? null
-    : await collectGatewaySicStatusEvidence(session, discoveredGatewayInventory, gatewaysAndServers);
-  const gatewayInventory = gatewaySicStatus
-    ? filterGatewayInventoryBySic(discoveredGatewayInventory, gatewaySicStatus)
-    : discoveredGatewayInventory;
+  const fallbackGatewayInventory = gatewaysAndServers.ok ? null : {
+    ok: gateways.ok || clusters.ok,
+    command: "show-simple-gateways/show-simple-clusters",
+    objects: [...(gateways.objects || []), ...(clusters.objects || [])],
+    error: gateways.error || clusters.error
+  };
+  const discoveredGatewayInventory = gatewayServerInventory(gatewaysAndServers, fallbackGatewayInventory);
+  session.scanProgress.currentStep = "Evaluating gateway SIC status from show-gateways-and-servers";
+  const gatewaySicStatus = collectGatewaySicStatusEvidence(discoveredGatewayInventory);
+  const gatewayInventory = filterGatewayInventoryBySic(discoveredGatewayInventory, gatewaySicStatus);
   const adGatewayObjects = {
     ok: gatewayInventory.ok,
     objects: [
@@ -7352,9 +7474,6 @@ async function scanHardening(session) {
     jumboHotfixEvidence,
     cveIkeEvidence,
     gaiaFullScanEvidence,
-    gaiaManagementExternalSyslog,
-    securityFeatureUsage,
-    sizingStatistics,
     administratorApiKeyAuthentication,
     administratorAccountChecks
   ] = await Promise.all([
@@ -7365,9 +7484,6 @@ async function scanHardening(session) {
     collectJumboHotfixEvidence(session, jumboHotfixTargets),
     collectCveIkeEvidence(session, globalProperties, eligibleSimpleGateways),
     collectGaiaFullScanEvidence(session, gaiaTargets, gatewaysAndServers),
-    collectGaiaManagementExternalSyslogEvidence(session, gatewaysAndServers),
-    collectSecurityFeatureUsageEvidence(session, gaiaTargets),
-    collectSizingStatisticsEvidence(session, gaiaTargets),
     skipSmart1OnlyChecks ? Promise.resolve(null) : evaluateAdministratorApiKeyAuthentication(administrators, session),
     evaluateAdministrators(administrators, session)
   ]);
@@ -7376,6 +7492,11 @@ async function scanHardening(session) {
   const gaiaPasswordPolicy = gaiaFullScanEvidence.passwordPolicy;
   const gaiaSnmpMonitoring = gaiaFullScanEvidence.snmpMonitoring;
   const gaiaSystemLogging = gaiaFullScanEvidence.systemLogging;
+  const gaiaManagementExternalSyslog = session.smart1Cloud
+    ? await collectGaiaManagementExternalSyslogEvidence(session, gatewaysAndServers)
+    : gaiaFullScanEvidence.managementExternalSyslog;
+  const securityFeatureUsage = gaiaFullScanEvidence.securityFeatureUsage;
+  const sizingStatistics = gaiaFullScanEvidence.sizingStatistics;
 
   let checks = [
     ...(skipManagementPlaneProtection ? [] : [
@@ -7415,6 +7536,7 @@ async function scanHardening(session) {
     user: currentScan.user,
     baseUrl: currentScan.baseUrl,
     customerName: currentScan.customerName,
+    reportDomainName: currentScan.reportDomainName,
     managementObjectName: session.managementObjectName || "",
     guide: {
       title: "Check Point Gateway and Management Hardening Administration Guide",
@@ -7440,8 +7562,8 @@ async function scanHardening(session) {
       "show-login-restrictions": loginRestrictions.ok ? "ok" : loginRestrictions.error,
       "show-cp-password-requirements": cpPasswordRequirements.ok ? "ok" : cpPasswordRequirements.error,
       "show-global-properties": globalProperties.ok ? "ok" : globalProperties.error,
-      "show-simple-gateways": gateways.ok ? "ok" : gateways.error,
-      "show-simple-clusters": clusters.ok ? "ok" : clusters.error,
+      ...(gateways.skipped ? {} : { "show-simple-gateways": gateways.ok ? "ok" : gateways.error }),
+      ...(clusters.skipped ? {} : { "show-simple-clusters": clusters.ok ? "ok" : clusters.error }),
       "show-packages": packages.ok ? "ok" : packages.error,
       "show-data-center-servers": dataCenterServers.ok ? "ok" : dataCenterServers.error,
       "show-gateways-and-servers": gatewaysAndServers.ok ? "ok" : gatewaysAndServers.error,
@@ -7449,7 +7571,7 @@ async function scanHardening(session) {
       "show-address-ranges": addressRanges.ok ? "ok" : addressRanges.error,
       "gateway-inventory": gatewayInventory.ok ? "ok" : gatewayInventory.error,
       ...(gatewaySicStatus ? {
-        "mgmt_cli/test-sic-status": gatewaySicStatus.ok ? "ok" : { error: `${gatewaySicStatus.rows?.length || 0} gateway object${(gatewaySicStatus.rows?.length || 0) === 1 ? " is" : "s are"} not communicating` }
+        "show-gateways-and-servers/sic-status": gatewaySicStatus.ok ? "ok" : { error: `${gatewaySicStatus.rows?.length || 0} gateway object${(gatewaySicStatus.rows?.length || 0) === 1 ? " is" : "s are"} not communicating` }
       } : {}),
       ...(skipManagementPlaneProtection ? {} : {
         "run-script/management-firewall": managementFirewallProtection.ok ? "ok" : { error: `${managementFirewallProtection.errors?.length || 0} lookup error${(managementFirewallProtection.errors?.length || 0) === 1 ? "" : "s"}` }
@@ -9990,7 +10112,7 @@ async function handleApi(req, res) {
       });
       res.writeHead(200, {
         "content-type": "application/pdf",
-        "content-disposition": `attachment; filename="${customerPrefix}check-point-best-practices-hardening-report.pdf"`,
+        "content-disposition": `attachment; filename="${singleReportFilename(session.lastHardeningScan)}"`,
         "content-length": result.file.length
       });
       res.end(result.file, () => {
