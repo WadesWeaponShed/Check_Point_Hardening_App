@@ -41,7 +41,7 @@ PORT=8080 npm start
 
 1. Select the management host type.
 2. Enter the management host and authenticate with a password or API key.
-3. For MDS, provide the domain and the global MDS object name when Gaia checks are needed.
+3. For MDS, provide the domain and the MDS server hostname when Gaia checks are needed.
 4. Run **Scan Hardening Posture**.
 5. Review evidence and use remediation controls only after validating the target and impact.
 6. Export a PDF only if a report is required, then log out and stop the process.
