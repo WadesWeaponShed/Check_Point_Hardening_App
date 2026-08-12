@@ -7490,10 +7490,10 @@ async function scanHardening(session) {
   };
   const jumboHotfixTargets = {
     ok: gatewayInventory.ok,
-    objects: [
-      ...gatewayInventory.simpleGateways,
-      ...gatewayInventory.clusters
-    ],
+    // Software packages are installed on physical gateways. A logical cluster
+    // object does not have its own package inventory, so expand clusters to
+    // their members and keep standalone gateways as direct targets.
+    objects: gatewayInventory.runScriptTargets,
     error: gatewayInventory.error
   };
   const eligibleSimpleGateways = { ok: gatewayInventory.ok, objects: gatewayInventory.simpleGateways, error: gatewayInventory.error };
@@ -8007,12 +8007,11 @@ async function evaluateSingleHardeningCheck(session, checkId) {
       ]);
       const gatewayInventory = gatewayServerInventory(gatewaysAndServers, gateways);
       const jumboHotfixTargets = {
-        ok: gateways.ok || clusters.ok,
-        objects: [
-          ...(gateways.ok ? gateways.objects || [] : []),
-          ...(clusters.ok ? clusters.objects || [] : [])
-        ],
-        error: gateways.error || clusters.error
+        ok: gatewayInventory.ok,
+        // Match the full scan: query standalone gateways and physical cluster
+        // members, never the logical cluster object.
+        objects: gatewayInventory.runScriptTargets,
+        error: gatewayInventory.error
       };
       const jumboHotfixEvidence = await collectJumboHotfixEvidence(session, jumboHotfixTargets);
       return {
