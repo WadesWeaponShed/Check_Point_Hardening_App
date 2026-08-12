@@ -7572,6 +7572,8 @@ async function scanHardening(session) {
     customerName: currentScan.customerName,
     reportDomainName: currentScan.reportDomainName,
     managementObjectName: session.managementObjectName || "",
+    gatewayTargets: gatewayInventory.runScriptTargets.map((gateway) => gateway.name || gateway.uid).filter(Boolean),
+    clusterTargets: gatewayInventory.clusters.map((cluster) => cluster.name || cluster.uid).filter(Boolean),
     guide: {
       title: "Check Point Gateway and Management Hardening Administration Guide",
       date: "01 June 2026",
