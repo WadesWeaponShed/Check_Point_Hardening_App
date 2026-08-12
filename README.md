@@ -1,12 +1,12 @@
-# Check Point Hardening App - Single Use Public Edition
+# Check Point Hardening App - Open Public Edition
 
 > Development line: Version 2.0 (`develop/v2`). The protected V1 baseline is tagged `v1.0.0-baseline`; V1 maintenance belongs on `release/v1`.
 
-The Single Use Public Edition connects to a Check Point Security Management Server, Multi-Domain Server, or Smart-1 Cloud tenant, gathers Management API evidence, evaluates hardening checks, and can perform only the remediation actions explicitly offered in the interface.
+The Open Public Edition connects to a Check Point Security Management Server, Multi-Domain Server, or Smart-1 Cloud tenant, gathers Management API evidence, evaluates hardening checks, and can perform only the remediation actions explicitly offered in the interface.
 
 This project is independent and is not created, endorsed, or supported by Check Point Software Technologies.
 
-## Single Use Public Edition privacy model
+## Open Public Edition privacy model
 
 - The app does not include a **Mark as Reviewed** control.
 - The app does not keep an audit trail or per-check history of remediation changes.
