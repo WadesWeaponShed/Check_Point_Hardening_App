@@ -2072,6 +2072,7 @@ async function collectGatewaySicStatusEvidence(session, gatewayInventory) {
   const targets = [...(gatewayInventory.simpleGateways || []), ...(gatewayInventory.clusterMembers || [])];
   const seen = new Set();
   const uniqueTargets = targets.filter((gateway) => {
+    if (isClusterGatewayObject(gateway)) return false;
     const key = gateway.uid || normalizeToken(gateway.name || gateway.NAME || "");
     if (!key || seen.has(key)) return false;
     seen.add(key);
