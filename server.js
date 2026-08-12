@@ -2073,6 +2073,7 @@ async function collectGatewaySicStatusEvidence(session, gatewayInventory) {
   const targets = [...(gatewayInventory.simpleGateways || []), ...(gatewayInventory.clusterMembers || [])];
   const seen = new Set();
   const uniqueTargets = targets.filter((gateway) => {
+    if (isClusterGatewayObject(gateway)) return false;
     const key = gateway.uid || normalizeToken(gateway.name || gateway.NAME || "");
     if (!key || seen.has(key)) return false;
     seen.add(key);
@@ -7576,6 +7577,14 @@ async function scanHardening(session) {
     managementObjectName: session.managementObjectName || "",
     gatewayTargets: gatewayInventory.runScriptTargets.map((gateway) => gateway.name || gateway.uid).filter(Boolean),
     clusterTargets: gatewayInventory.clusters.map((cluster) => cluster.name || cluster.uid).filter(Boolean),
+    clusterMemberships: gatewayInventory.clusters.flatMap((cluster) => {
+      const clusterName = cluster.name || cluster.NAME || cluster.uid || "";
+      const members = [
+        ...(cluster["cluster-member-names"] || cluster.clusterMemberNames || []),
+        ...(cluster["cluster-members"] || cluster.clusterMembers || []).map((member) => member?.name || member?.NAME || member)
+      ].filter(Boolean);
+      return members.map((memberName) => ({ memberName, clusterName }));
+    }),
     guide: {
       title: "Check Point Gateway and Management Hardening Administration Guide",
       date: "01 June 2026",

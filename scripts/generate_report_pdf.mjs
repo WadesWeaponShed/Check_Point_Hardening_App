@@ -414,6 +414,15 @@ function infrastructureGatewayTargets(checks = [], scan = {}, objectName = "") {
   return [...targets.values()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 }
 
+function infrastructureGatewayLabel(targetName, scan = {}) {
+  const name = canonicalGatewayName(targetName);
+  const key = gatewayKey(name);
+  const clusterKeys = new Set((scan.clusterTargets || []).map(gatewayKey).filter(Boolean));
+  if (clusterKeys.has(key)) return `${name} (Cluster Object)`;
+  const membership = (scan.clusterMemberships || []).find((item) => gatewayKey(item.memberName) === key);
+  return membership?.clusterName ? `${name} (cluster member of: ${canonicalGatewayName(membership.clusterName)})` : name;
+}
+
 function infrastructureChecks(checks = [], scan = {}) {
   const managementObjectChecks = checks.filter((check) => checkOwnerScope(check) === "management" && isManagementObjectCheck(check));
   const objectName = managementObjectName(managementObjectChecks, scan);
@@ -449,7 +458,7 @@ function infrastructureChecks(checks = [], scan = {}) {
       output.push({
         ...targetCheck,
         infrastructureSection: gatewayKey(target) === gatewayKey(objectName) ? "Policy and Management" : "Gateways and Clusters",
-        infrastructureTarget: canonicalGatewayName(target)
+        infrastructureTarget: infrastructureGatewayLabel(target, scan)
       });
     }
   }

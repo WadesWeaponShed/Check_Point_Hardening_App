@@ -1519,6 +1519,15 @@ function infrastructureGatewayTargets(checks = [], managementObjectName = "") {
   return [...targets.values()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 }
 
+function infrastructureGatewayLabel(targetName) {
+  const name = canonicalGatewayName(targetName);
+  const key = gatewayIdentityKey(name);
+  const clusterKeys = new Set((hardeningScan?.clusterTargets || []).map(gatewayIdentityKey).filter(Boolean));
+  if (clusterKeys.has(key)) return `${name} (Cluster Object)`;
+  const membership = (hardeningScan?.clusterMemberships || []).find((item) => gatewayIdentityKey(item.memberName) === key);
+  return membership?.clusterName ? `${name} (cluster member of: ${canonicalGatewayName(membership.clusterName)})` : name;
+}
+
 function renderInfrastructureHierarchy(checks = [], contextKey = "environment") {
   const managementOwnedChecks = checks.filter((check) => checkOwnerScope(check) === "management");
   const policyChecks = checks.filter((check) => checkOwnerScope(check) === "policy");
@@ -1569,7 +1578,7 @@ function renderInfrastructureHierarchy(checks = [], contextKey = "environment") 
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
     .map(({ name: target, checks: targetChecks }, index) => renderHierarchyNode({
     key: `${contextKey}:gateway:${target}`,
-    title: target,
+    title: infrastructureGatewayLabel(target),
     description: "All checks and target-specific evidence for this gateway or cluster",
     checks: orderInfrastructureChecks(targetChecks),
     open: index === 0,
