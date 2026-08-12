@@ -2003,7 +2003,25 @@ function gatewayServerInventory(gatewaysAndServersResult, fallbackGatewaysResult
   const byName = new Map(namedObjects.map((object) => [normalizeToken(object.name || object.NAME || object.uid), object]));
   const simpleGateways = namedObjects.filter(isSimpleGatewayObject);
   const clusters = namedObjects.filter(isClusterGatewayObject);
-  const clusterMembers = namedObjects.filter(isClusterMemberObject);
+  const clusterByMemberName = new Map();
+  clusters.forEach((cluster) => {
+    const blades = cluster["network-security-blades"] || cluster.networkSecurityBlades;
+    const memberNames = [
+      ...(cluster["cluster-member-names"] || cluster.clusterMemberNames || []),
+      ...(cluster["cluster-members"] || cluster.clusterMembers || []).map((member) => member?.name || member?.NAME || member)
+    ].filter(Boolean);
+    memberNames.forEach((memberName) => {
+      clusterByMemberName.set(normalizeToken(memberName), blades);
+    });
+  });
+  const clusterMembers = namedObjects.filter(isClusterMemberObject).map((member) => {
+    const ownBlades = member["network-security-blades"] || member.networkSecurityBlades;
+    const inheritedBlades = clusterByMemberName.get(normalizeToken(member.name || member.NAME || ""));
+    return ownBlades || inheritedBlades
+      ? { ...member, _effectiveNetworkSecurityBlades: ownBlades || inheritedBlades }
+      : member;
+  });
+  const effectiveMemberByName = new Map(clusterMembers.map((member) => [normalizeToken(member.name || member.NAME || member.uid), member]));
   const managementServers = namedObjects.filter(isManagementServerObject);
   const policyTargets = [...simpleGateways, ...clusters];
   const managedGateways = [...simpleGateways, ...clusters, ...clusterMembers];
@@ -2011,7 +2029,7 @@ function gatewayServerInventory(gatewaysAndServersResult, fallbackGatewaysResult
     ...simpleGateways,
     ...clusterMembers,
     ...clusters.flatMap((cluster) => (cluster["cluster-member-names"] || cluster.clusterMemberNames || [])
-      .map((name) => byName.get(normalizeToken(name)))
+      .map((name) => effectiveMemberByName.get(normalizeToken(name)) || byName.get(normalizeToken(name)))
       .filter(Boolean))
   ];
   const topologyObjects = namedObjects.filter((object) => {
@@ -2274,8 +2292,9 @@ function licenseFeatureEnabledState(feature, gateway = {}) {
     return "Please Confirm Config Manually in Assigned Threat Profile";
   }
   const bladeKey = LICENSE_FEATURE_BLADE_KEYS.get(code);
-  if (!bladeKey) return { value: "Disabled", tone: "critical" };
-  const blades = gateway["network-security-blades"] || gateway.networkSecurityBlades || {};
+  if (!bladeKey) return { value: "Unable to determine", tone: "unknown" };
+  const blades = gateway._effectiveNetworkSecurityBlades || gateway["network-security-blades"] || gateway.networkSecurityBlades;
+  if (!blades || typeof blades !== "object") return { value: "Not returned", tone: "unknown" };
   return blades[bladeKey] === true
     ? { value: "Enabled", tone: "success" }
     : { value: "Disabled", tone: "critical" };
