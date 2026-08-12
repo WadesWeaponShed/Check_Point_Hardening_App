@@ -1293,6 +1293,9 @@ function renderCheckGroupsMarkup(checks = []) {
 
 function checkOwnerScope(check = {}) {
   const id = String(check.id || "");
+  if (id === "updates.dynamic-updates" || id === "updates.cpdiag") {
+    return "management";
+  }
   if (id.startsWith("policy.") || id === "cve.site-to-site-communities" || id === "advanced.explicit-rules") {
     return "policy";
   }

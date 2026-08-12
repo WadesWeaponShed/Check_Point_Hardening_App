@@ -282,6 +282,7 @@ function groupChecks(checks) {
 
 function checkOwnerScope(check = {}) {
   const id = String(check.id || "");
+  if (id === "updates.dynamic-updates" || id === "updates.cpdiag") return "management";
   if (id.startsWith("policy.") || id === "cve.site-to-site-communities" || id === "advanced.explicit-rules") return "policy";
   if (id.startsWith("gaia.") || id.startsWith("updates.") || id.startsWith("security-feature-usage.") || id === "cve.legacy-clients") {
     return id === "gaia.management-external-syslog" ? "management" : "gateway";
@@ -497,6 +498,53 @@ function reportSections(checks, layout = "category", scan = {}) {
 }
 
 function renderToc(sections, pageNumbers = {}) {
+  const renderChecks = (section) => {
+    const grouped = [];
+    for (const entry of section.checks) {
+      const target = String(entry.check.infrastructureTarget || "").trim();
+      if (!target) {
+        grouped.push({ target: "", entries: [entry] });
+        continue;
+      }
+      const existing = grouped.find((group) => group.target === target);
+      if (existing) existing.entries.push(entry);
+      else grouped.push({ target, entries: [entry] });
+    }
+    return grouped.map((group) => {
+      if (!group.target) {
+        return group.entries.map(({ check, id, marker }) => `
+          <li>
+            <a href="#${id}">
+              <span class="toc-label">${escapeHtml(check.title || "Untitled Check")}</span>
+              <span class="toc-leader" aria-hidden="true"></span>
+              <span class="toc-page">${escapeHtml(String(pageNumbers[marker] || "000"))}</span>
+            </a>
+          </li>
+        `).join("");
+      }
+      const first = group.entries[0];
+      return `
+        <li class="toc-target">
+          <a href="#${first.id}" class="toc-target-link">
+            <span class="toc-label">${escapeHtml(group.target)}</span>
+            <span class="toc-leader" aria-hidden="true"></span>
+            <span class="toc-page">${escapeHtml(String(pageNumbers[first.marker] || "000"))}</span>
+          </a>
+          <ol class="toc-target-checks">
+            ${group.entries.map(({ check, id, marker }) => `
+              <li>
+                <a href="#${id}">
+                  <span class="toc-label">${escapeHtml(check.title || "Untitled Check")}</span>
+                  <span class="toc-leader" aria-hidden="true"></span>
+                  <span class="toc-page">${escapeHtml(String(pageNumbers[marker] || "000"))}</span>
+                </a>
+              </li>
+            `).join("")}
+          </ol>
+        </li>
+      `;
+    }).join("");
+  };
   return `
     <section class="table-of-contents">
       <h2>Table of Contents</h2>
@@ -510,15 +558,7 @@ function renderToc(sections, pageNumbers = {}) {
               <span class="toc-page">${escapeHtml(String(pageNumbers[section.marker] || "000"))}</span>
             </a>
             <ol class="toc-checks">
-              ${section.checks.map(({ check, tocTitle, id, marker }) => `
-                <li>
-                  <a href="#${id}">
-                    <span class="toc-label">${escapeHtml(tocTitle || check.title || "Untitled Check")}</span>
-                    <span class="toc-leader" aria-hidden="true"></span>
-                    <span class="toc-page">${escapeHtml(String(pageNumbers[marker] || "000"))}</span>
-                  </a>
-                </li>
-              `).join("")}
+              ${renderChecks(section)}
             </ol>
           </li>
         `).join("")}
@@ -603,12 +643,17 @@ function renderHtml(scan, pageSize, pageNumbers = {}) {
     .table-of-contents { break-before: page; page-break-before: always; }
     .table-of-contents h2 { margin: 0 0 4px; color: #142033; font-size: 24px; line-height: 1.1; }
     .toc-intro { margin: 0 0 13px; color: #65758b; font-size: 10px; font-weight: 700; }
-    .toc-categories, .toc-checks { list-style: none; margin: 0; padding: 0; }
+    .toc-categories, .toc-checks, .toc-target-checks { list-style: none; margin: 0; padding: 0; }
     .toc-category { break-inside: avoid; margin: 0 0 7px; }
     .toc-category > a { color: #142033; font-size: 11px; font-weight: 900; }
     .toc-checks { margin: 3px 0 0 15px; }
     .toc-checks li { break-inside: avoid; margin: 0 0 2px; }
     .toc-checks a { color: #40516a; font-size: 9.5px; font-weight: 700; }
+    .toc-target { break-inside: avoid; margin: 4px 0 6px; }
+    .toc-target > .toc-target-link { color: #142033; font-size: 10px; font-weight: 900; }
+    .toc-target-checks { margin: 2px 0 0 16px; }
+    .toc-target-checks li { break-inside: avoid; margin: 0 0 2px; }
+    .toc-target-checks a { color: #526174; font-size: 9px; font-weight: 700; }
     .table-of-contents a { display: flex; align-items: baseline; gap: 6px; text-decoration: none; }
     .toc-label { min-width: 0; }
     .toc-leader { flex: 1 1 auto; min-width: 16px; border-bottom: 1px dotted #aab5c3; transform: translateY(-2px); }
