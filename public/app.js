@@ -1526,6 +1526,7 @@ function renderInfrastructureHierarchy(checks = [], contextKey = "environment") 
   const managementObjectChecks = managementOwnedChecks.filter(isManagementObjectCheck);
   const managementObjectName = managementObjectDisplayName([...managementObjectChecks, ...gatewayChecks]);
   const managementObjectKey = gatewayIdentityKey(managementObjectName);
+  const logicalClusterKeys = new Set((hardeningScan?.clusterTargets || []).map(gatewayIdentityKey).filter(Boolean));
   const knownGatewayTargets = infrastructureGatewayTargets(gatewayChecks, managementObjectName);
   const managementChecks = [
     ...managementOwnedChecks.filter((check) => !isManagementObjectCheck(check)),
@@ -1544,6 +1545,9 @@ function renderInfrastructureHierarchy(checks = [], contextKey = "environment") 
     if (!targets.length) continue;
     for (const target of targets) {
       const targetKey = gatewayIdentityKey(target);
+      // Logical cluster objects only own policy-level stealth-rule findings.
+      // Appliance checks belong to standalone gateways or physical members.
+      if (logicalClusterKeys.has(targetKey)) continue;
       if (managementObjectKey && targetKey === managementObjectKey) {
         managementObjectChecks.push(checkForGateway(check, target, targets.length, { referenceLocation: "Categories" }));
         continue;

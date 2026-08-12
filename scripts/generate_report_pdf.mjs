@@ -418,6 +418,7 @@ function infrastructureChecks(checks = [], scan = {}) {
   const managementObjectChecks = checks.filter((check) => checkOwnerScope(check) === "management" && isManagementObjectCheck(check));
   const objectName = managementObjectName(managementObjectChecks, scan);
   const gatewayOwnedChecks = checks.filter((check) => checkOwnerScope(check) === "gateway");
+  const logicalClusterKeys = new Set((scan.clusterTargets || []).map(gatewayKey).filter(Boolean));
   const knownGatewayTargets = infrastructureGatewayTargets(gatewayOwnedChecks, scan, objectName);
   const output = [
     ...checks.filter((check) => checkOwnerScope(check) === "management" && !isManagementObjectCheck(check)).map((check) => ({ ...check, infrastructureSection: "Policy and Management" })),
@@ -442,6 +443,7 @@ function infrastructureChecks(checks = [], scan = {}) {
     const checkTargets = targetsForCheck(check);
     const targets = checkTargets.length ? checkTargets : knownGatewayTargets;
     for (const target of targets) {
+      if (logicalClusterKeys.has(gatewayKey(target)) && check.id !== "policy.stealth-rule") continue;
       if (check.id === "policy.stealth-rule" && !hasTargetFinding(check, target)) continue;
       const targetCheck = checkForTarget(check, target, targets.length);
       output.push({
