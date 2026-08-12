@@ -208,8 +208,9 @@ h1 {
 
 .title-stack span:last-child {
   color: var(--accent);
-  font-size: clamp(28px, 4vw, 46px);
+  font-size: clamp(26px, 3.5vw, 42px);
   line-height: 1;
+  white-space: nowrap;
 }
 
 .title-stack.compact {
@@ -226,6 +227,10 @@ h1 {
 
 @media (max-width: 760px) {
   .login-panel .title-stack span:first-child {
+    white-space: normal;
+  }
+
+  .title-stack span:last-child {
     white-space: normal;
   }
 }

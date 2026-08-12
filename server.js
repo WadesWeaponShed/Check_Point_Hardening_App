@@ -10209,5 +10209,5 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  log("Check Point Hardening App - Single Use Public Edition listening", { url: `http://${HOST}:${PORT}` });
+  log("Check Point Hardening App - Open Public Edition listening", { url: `http://${HOST}:${PORT}` });
 });

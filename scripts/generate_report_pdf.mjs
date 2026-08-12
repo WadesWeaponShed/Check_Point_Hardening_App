@@ -456,7 +456,7 @@ function renderHtml(scan, pageSize, pageNumbers = {}) {
   </style>
 </head>
 <body>
-  <h1 class="report-title">Check Point Hardening App - Single Use Public Edition</h1>
+  <h1 class="report-title">Check Point Hardening App - Open Public Edition</h1>
   ${scan.reportDomainName ? `<p class="report-meta"><strong>Domain:</strong> ${escapeHtml(scan.reportDomainName)}</p>` : ""}
   <p class="report-meta">Scanned: ${escapeHtml(formatDate(scan.scannedAt))}</p>
   <div class="summary-grid">
