@@ -24,6 +24,9 @@ const TASK_POLL_ATTEMPTS = positiveIntegerEnv("TASK_POLL_ATTEMPTS", 20);
 const TASK_POLL_INTERVAL_MS = positiveIntegerEnv("TASK_POLL_INTERVAL_MS", 1000);
 const TASK_POLL_MAX_INTERVAL_MS = positiveIntegerEnv("TASK_POLL_MAX_INTERVAL_MS", 4000);
 const CP_API_TIMEOUT_MS = positiveIntegerEnv("CP_API_TIMEOUT_MS", 45_000);
+const CP_SIC_TEST_TIMEOUT_MS = positiveIntegerEnv("CP_SIC_TEST_TIMEOUT_MS", 120_000);
+const SIC_TEST_CONCURRENCY = positiveIntegerEnv("SIC_TEST_CONCURRENCY", 8);
+const LARGE_ENV_SIC_TEST_CONCURRENCY = positiveIntegerEnv("LARGE_ENV_SIC_TEST_CONCURRENCY", 4);
 const CP_LOG_API_TIMEOUT_MS = positiveIntegerEnv("CP_LOG_API_TIMEOUT_MS", 120_000);
 const CP_VPN_API_TIMEOUT_MS = positiveIntegerEnv("CP_VPN_API_TIMEOUT_MS", 120_000);
 const VPN_COMMUNITY_PAGE_LIMIT = positiveIntegerEnv("VPN_COMMUNITY_PAGE_LIMIT", 50);
@@ -513,8 +516,10 @@ function cpRequestUnqueued(session, command, body = {}) {
       });
     });
 
-    const timeoutMs = command === "show-logs"
-      ? CP_LOG_API_TIMEOUT_MS
+    const timeoutMs = command === "test-sic-status"
+      ? CP_SIC_TEST_TIMEOUT_MS
+      : command === "show-logs"
+        ? CP_LOG_API_TIMEOUT_MS
       : (command === "show-vpn-communities-star" || command === "show-vpn-communities-meshed"
           ? CP_VPN_API_TIMEOUT_MS
           : CP_API_TIMEOUT_MS);
@@ -2043,22 +2048,7 @@ function gatewayObjectIpAddress(gateway = {}) {
     || firstIpv4(allIpv4Values(gateway).join(" ")) || "Not returned";
 }
 
-function normalizedGatewaySicStatus(gateway = {}) {
-  const rawStatus = gateway["sic-status"] ?? gateway.sicStatus ?? "unknown";
-  const statusToken = normalizeToken(rawStatus);
-  const statusLabels = new Map([
-    ["uninitialized", "Uninitialized"],
-    ["initialized", "Initialized"],
-    ["notcommunicating", "Not Communicating"],
-    ["unknown", "Unknown"],
-    ["failed", "Failed"],
-    ["waitingforfirstconnection", "Waiting For First Connection"],
-    ["communicating", "Communicating"]
-  ]);
-  return statusLabels.get(statusToken) || "Unknown";
-}
-
-function collectGatewaySicStatusEvidence(gatewayInventory) {
+async function collectGatewaySicStatusEvidence(session, gatewayInventory) {
   // Management server objects are intentionally excluded: SIC status is only
   // relevant here for gateways and cluster members that will be scanned.
   const targets = [...(gatewayInventory.simpleGateways || []), ...(gatewayInventory.clusterMembers || [])];
@@ -2069,11 +2059,34 @@ function collectGatewaySicStatusEvidence(gatewayInventory) {
     seen.add(key);
     return true;
   });
-  const results = uniqueTargets.map((gateway) => {
+  const statusLabels = new Map([
+    ["uninitialized", "Uninitialized"],
+    ["initialized", "Initialized"],
+    ["communicating", "Communicating"],
+    ["notcommunicating", "Not Communicating"],
+    ["unknown", "Unknown"],
+    ["failed", "Failed"],
+    ["waitingforfirstconnection", "Waiting For First Connection"]
+  ]);
+  const sicTestQueue = createLimiter(session?.largeEnvironmentMode ? LARGE_ENV_SIC_TEST_CONCURRENCY : SIC_TEST_CONCURRENCY);
+  const results = await Promise.all(uniqueTargets.map((gateway) => sicTestQueue(async () => {
     const name = gateway.name || gateway.NAME || gateway.uid || "";
-    const status = normalizedGatewaySicStatus(gateway);
-    return { gateway, name, status, communicating: status === "Communicating" };
-  });
+    const test = await tryCommand(session, "test-sic-status", { name });
+    const rawStatus = test.ok ? (test.data?.["sic-status"] ?? test.data?.sicStatus ?? "unknown") : "test-failed";
+    const statusToken = normalizeToken(rawStatus);
+    const communicating = statusToken === "communicating";
+    const status = communicating
+      ? "Communicating"
+      : (test.ok ? (statusLabels.get(statusToken) || `Unknown (${String(rawStatus || "not returned")})`) : "SIC Test Failed");
+    return {
+      gateway,
+      name,
+      status,
+      communicating,
+      message: test.ok ? String(test.data?.["sic-message"] || "") : String(test.error?.error || "test-sic-status failed"),
+      sicName: test.ok ? String(test.data?.["sic-name"] || "") : ""
+    };
+  })));
 
   const nonCommunicating = results.filter((result) => !result.communicating);
   const blockedKeys = new Set(nonCommunicating.flatMap(({ gateway }) => [
@@ -2082,11 +2095,13 @@ function collectGatewaySicStatusEvidence(gatewayInventory) {
   ]).filter(Boolean));
   return {
     ok: nonCommunicating.length === 0,
-    command: "show-gateways-and-servers: sic-status",
-    rows: nonCommunicating.map(({ gateway, name, status }) => ({
+    command: "test-sic-status",
+    rows: nonCommunicating.map(({ gateway, name, status, message, sicName }) => ({
       "Object Name": name,
       "Object IP-Address": gatewayObjectIpAddress(gateway),
-      "SIC Status": status
+      "SIC Status": status,
+      "SIC Message": message || "Not returned",
+      "SIC Name": sicName || "Not returned"
     })),
     blockedKeys,
     results
@@ -6135,14 +6150,14 @@ function evaluateGatewayObjectStatus(result) {
         : "No managed gateway or cluster member objects were available for SIC validation."),
     evidenceTone: !rows.length && result.results?.length ? "success" : "",
     evidenceTable: rows.length ? {
-      columns: ["Object Name", "Object IP-Address", "SIC Status"],
+      columns: ["Object Name", "Object IP-Address", "SIC Status", "SIC Message", "SIC Name"],
       rows
     } : null,
     details: rows.length
-      ? "Only objects whose show-gateways-and-servers SIC state is not Communicating are shown. These objects were skipped by subsequent gateway-level checks to avoid unnecessary scan time. Validate that an object is obsolete before deleting it."
+      ? "Only objects whose live test-sic-status result is not Communicating are shown. These objects were skipped by subsequent gateway-level checks to avoid unnecessary scan time. Validate that an object is obsolete before deleting it."
       : "Only gateway and cluster member objects that do not return a Communicating SIC state appear in this subsection.",
-    source: "Hardening review: Decreasing Security Gateway Exposure with Policy - Gateway Object SIC Status",
-    commands: [result.command || "show-gateways-and-servers: sic-status"]
+    source: "Hardening review: active Gateway Object SIC Status",
+    commands: [result.command || "test-sic-status: name <gateway object>"]
   });
 }
 
@@ -7443,8 +7458,8 @@ async function scanHardening(session) {
     error: gateways.error || clusters.error
   };
   const discoveredGatewayInventory = gatewayServerInventory(gatewaysAndServers, fallbackGatewayInventory);
-  session.scanProgress.currentStep = "Evaluating gateway SIC status from show-gateways-and-servers";
-  const gatewaySicStatus = collectGatewaySicStatusEvidence(discoveredGatewayInventory);
+  session.scanProgress.currentStep = "Testing active gateway SIC communication";
+  const gatewaySicStatus = await collectGatewaySicStatusEvidence(session, discoveredGatewayInventory);
   const gatewayInventory = filterGatewayInventoryBySic(discoveredGatewayInventory, gatewaySicStatus);
   const adGatewayObjects = {
     ok: gatewayInventory.ok,
@@ -7571,7 +7586,7 @@ async function scanHardening(session) {
       "show-address-ranges": addressRanges.ok ? "ok" : addressRanges.error,
       "gateway-inventory": gatewayInventory.ok ? "ok" : gatewayInventory.error,
       ...(gatewaySicStatus ? {
-        "show-gateways-and-servers/sic-status": gatewaySicStatus.ok ? "ok" : { error: `${gatewaySicStatus.rows?.length || 0} gateway object${(gatewaySicStatus.rows?.length || 0) === 1 ? " is" : "s are"} not communicating` }
+        "test-sic-status": gatewaySicStatus.ok ? "ok" : { error: `${gatewaySicStatus.rows?.length || 0} gateway object${(gatewaySicStatus.rows?.length || 0) === 1 ? " is" : "s are"} not communicating` }
       } : {}),
       ...(skipManagementPlaneProtection ? {} : {
         "run-script/management-firewall": managementFirewallProtection.ok ? "ok" : { error: `${managementFirewallProtection.errors?.length || 0} lookup error${(managementFirewallProtection.errors?.length || 0) === 1 ? "" : "s"}` }
