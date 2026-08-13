@@ -7186,8 +7186,8 @@ function evaluateCveGlobalIkeProperty(result, session) {
   }
   return makeCheck({
     id: checkId,
-    category: "CVE-2026-50751 & CVE-2026-50752 IKE Check",
-    title: "IKE Version Global Property Scan And Remediate (CVE-2026-50751)",
+    category: "IKE Hardening",
+    title: "IKE Version Global Property",
     recommendation: "Set the Remote Access VPN authentication and encryption global property to IKEv2 only. IKEv1 is deprecated and no longer industry best practice.",
     status: result.global.currentMethod
       ? (reviewedThisLogin ? "reviewed" : (result.global.needsChange ? "remediation-recommended" : "needs-review"))
@@ -7235,8 +7235,8 @@ function evaluateCveLegacyClients(result, session) {
   const needsChangeCount = result.legacyRows.filter((gateway) => gateway.needsChange).length;
   return makeCheck({
     id: checkId,
-    category: "CVE-2026-50751 & CVE-2026-50752 IKE Check",
-    title: "Legacy Clients Allowed Check Scan And Remediate (CVE-2026-50751)",
+    category: "IKE Hardening",
+    title: "Legacy VPN Client Check",
     recommendation: "Disable legacy VPN clients unless there is a documented business requirement. Allowing legacy clients can preserve support for IKEv1, which is no longer an industry best practice.",
     status: reviewedThisLogin ? "reviewed" : (needsChangeCount ? "remediation-recommended" : (rows.length ? "needs-review" : "unknown")),
     severity: needsChangeCount ? "high" : "medium",
@@ -7287,8 +7287,8 @@ function evaluateCveSiteToSiteCommunities(result, session) {
   const matches = result.communityMatches.length;
   return makeCheck({
     id: checkId,
-    category: "CVE-2026-50751 & CVE-2026-50752 IKE Check",
-    title: "Site-To-Site VPN Communities Scan And Remediate (CVE-2026-50752)",
+    category: "IKE Hardening",
+    title: "Site-To-Site VPN Communities IKE Version",
     recommendation: "Review site-to-site VPN communities that use deprecated IKEv1 with certificate-based authentication and migrate them to IKEv2 only.",
     status: reviewedThisLogin ? "reviewed" : (matches ? "remediation-recommended" : (rows.length ? "needs-review" : "unknown")),
     severity: matches ? "high" : "medium",
