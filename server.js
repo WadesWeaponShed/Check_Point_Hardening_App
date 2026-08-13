@@ -4188,15 +4188,16 @@ function buildAccessLayerPackageLookup(packagesResult) {
     if (Array.isArray(value)) {
       value.forEach((item, index) => {
         const childPath = [...path, String(index)];
-        if (path.some((part) => normalizeToken(part).includes("accesslayer"))) {
+        if (normalizeToken(path.at(-1)).includes("accesslayer")) {
           remember(item, packageName);
         }
         rememberNestedAccessLayers(item, packageName, childPath);
       });
       return;
     }
-    if ((value.type && normalizeToken(value.type).includes("accesslayer")) || path.some((part) => normalizeToken(part).includes("accesslayer"))) {
+    if (value.type && normalizeToken(value.type).includes("accesslayer")) {
       remember(value, packageName);
+      return;
     }
     for (const [key, child] of Object.entries(value)) {
       rememberNestedAccessLayers(child, packageName, [...path, key]);
@@ -4246,15 +4247,16 @@ function accessLayersFromPackages(packagesResult) {
     if (!value || typeof value !== "object") return;
     if (Array.isArray(value)) {
       value.forEach((item, index) => {
-        if (path.some((part) => normalizeToken(part).includes("accesslayer"))) {
+        if (normalizeToken(path.at(-1)).includes("accesslayer")) {
           remember(item, packageName);
         }
         walk(item, packageName, [...path, String(index)]);
       });
       return;
     }
-    if ((value.type && normalizeToken(value.type).includes("accesslayer")) || path.some((part) => normalizeToken(part).includes("accesslayer"))) {
+    if (value.type && normalizeToken(value.type).includes("accesslayer")) {
       remember(value, packageName);
+      return;
     }
     for (const [key, child] of Object.entries(value)) {
       walk(child, packageName, [...path, key]);
