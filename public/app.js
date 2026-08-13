@@ -2346,9 +2346,11 @@ async function handleRemediationClick(event) {
       success: (result) => `${result.changed} enabled${result.published ? " and published" : ""}. Refreshing affected checks...`
     },
     "enable-syslog-forwarding": {
-      confirm: "Enable Gaia OS syslog forwarding to the Management Server for this target now?",
+      confirm: "Enable Gaia OS syslog forwarding to the Management Server for the checked gateways now?",
       path: "/api/remediate/enable-syslog-forwarding",
-      success: (result) => `Syslog forwarding enabled on ${result.targetName}. Refreshing affected checks...`
+      requiresSelection: true,
+      selectionError: "Select one or more gateways to remediate.",
+      success: (result) => `Syslog forwarding enabled on ${result.changedCount} gateway${result.changedCount === 1 ? "" : "s"}${result.failedCount ? `; ${result.failedCount} failed` : ""}. Refreshing affected checks...`
     },
     "cve-set-global-ikev2-only": {
       confirm: "Set the Remote Access VPN global IKE encryption method to IKEv2 only now?",
@@ -2399,7 +2401,8 @@ async function handleRemediationClick(event) {
   setBusy(true);
   try {
     const targetName = button.dataset.targetName || "";
-    const result = await api(remediation.path, { sessionId, checkId, uids, targetName });
+    const targetNames = action === "enable-syslog-forwarding" ? uids : [];
+    const result = await api(remediation.path, { sessionId, checkId, uids, targetName, targetNames });
     addNotice(remediation.success(result), "success");
     await refreshChecks(relatedRefreshCheckIds(checkId));
     renderChecks();
