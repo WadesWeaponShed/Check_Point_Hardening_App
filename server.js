@@ -9634,6 +9634,29 @@ async function enableGatewaySyslogForwarding(session, targetName) {
   };
 }
 
+async function enableGatewaySyslogForwardingForTargets(session, payload = {}) {
+  const targetNames = uniqueStrings([
+    ...(Array.isArray(payload.targetNames) ? payload.targetNames : []),
+    payload.targetName
+  ].filter(Boolean));
+  if (!targetNames.length) {
+    throw enrichError(new Error("No Security Gateway target was provided."), {
+      command: "run-script",
+      phase: "input-validation"
+    });
+  }
+  const changed = [];
+  const failed = [];
+  for (const targetName of targetNames) {
+    try {
+      changed.push(await enableGatewaySyslogForwarding(session, targetName));
+    } catch (error) {
+      failed.push({ targetName, error: error.message || String(error) });
+    }
+  }
+  return { ok: failed.length === 0, targetNames, changed, changedCount: changed.length, failed, failedCount: failed.length };
+}
+
 async function logout(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) {
@@ -10067,17 +10090,17 @@ async function handleApi(req, res) {
     if (req.url === "/api/remediate/enable-syslog-forwarding" && req.method === "POST") {
       log("Local API request", { requestId, route: req.url });
       const session = getSession(payload.sessionId);
-      const result = await enableGatewaySyslogForwarding(session, payload.targetName);
+      const result = await enableGatewaySyslogForwardingForTargets(session, payload);
       addAuditEntry({
         session,
         action: "Remediation Executed",
-        command: result.retried
+        command: result.changed.some((item) => item.retried)
           ? "run-script: lock database override, run-script: set syslog cplogs on"
           : "run-script: set syslog cplogs on",
-        target: result.targetName,
-        details: `Enabled Gaia OS syslog forwarding to Management Server on ${result.targetName}.`
+        target: result.targetNames.join(", "),
+        details: `Enabled Gaia OS syslog forwarding to Management Server on ${result.changedCount} selected target${result.changedCount === 1 ? "" : "s"}. ${result.failedCount} failed.`
       });
-      recordCheckChange(session, payload.checkId || "gaia.system-logging-management", `Last Change: ${auditUser(session)} enabled Gaia OS syslog forwarding to the Management Server on ${result.targetName}.`);
+      recordCheckChange(session, payload.checkId || "gaia.system-logging-management", `Last Change: ${auditUser(session)} enabled Gaia OS syslog forwarding to the Management Server on ${result.changedCount} selected target${result.changedCount === 1 ? "" : "s"}.`);
       sendJson(res, 200, { requestId, ...result });
       return;
     }
