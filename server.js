@@ -2211,7 +2211,11 @@ async function collectJumboHotfixEvidence(session, gatewaysResult) {
         "Recommended Upgrade Package": "Gateway Returns No Data"
       };
     }
-    const installed = packageListText(packages.installed) || gatewayInstalledVersion(gateway);
+    // show-gateways-and-servers is the reliable source for the installed
+    // gateway/member software version. Package inventory often omits its
+    // installed list, so use that only as a fallback.
+    const objectVersion = gatewayInstalledVersion(gateway);
+    const installed = objectVersion !== "Not returned" ? objectVersion : packageListText(packages.installed);
     const recommendedPackage = Array.isArray(packages.available)
       ? packages.available.find((pkg) => pkg.recommended === true || normalizeToken(pkg.recommended) === "true")
       : null;
