@@ -1966,6 +1966,18 @@ function packageListText(packages = []) {
     .join(", ");
 }
 
+function installedJumboVersion(packages = []) {
+  if (!Array.isArray(packages)) return "";
+  const versions = packages.flatMap((pkg) => {
+    if (normalizeToken(pkg?.category) !== "jumbo") return [];
+    const packageId = String(pkg?.["package-id"] || pkg?.packageId || pkg?.name || "");
+    const match = packageId.match(/(R\d+(?:[._]\d+)*)_jumbo.*?_T(\d+)(?:_|\.|$)/i);
+    if (!match) return [];
+    return [`${match[1].replaceAll("_", ".")} Take ${match[2]}`];
+  });
+  return uniqueStrings(versions).join(", ");
+}
+
 function packageCategoryLabel(value) {
   const normalized = normalizeToken(value);
   if (normalized === "jumbo") return "Jumbo";
@@ -2181,7 +2193,10 @@ async function collectJumboHotfixEvidence(session, gatewaysResult) {
 
   const errors = [];
   const gatewayNames = gateways.map((gateway) => gateway.name || gateway.NAME || gateway.uid || "").filter(Boolean);
-  const batchResult = await tryCommand(session, "show-software-packages-per-targets", { targets: gatewayNames });
+  const batchResult = await tryCommand(session, "show-software-packages-per-targets", {
+    display: { installed: "any", recommended: "any" },
+    targets: gatewayNames
+  });
   const returnedTargets = batchResult.ok && Array.isArray(batchResult.data?.targets) ? [...batchResult.data.targets] : [];
   const returnedKeys = new Set(returnedTargets.flatMap((target) => [target.uid, normalizeToken(target.name || "")]).filter(Boolean));
   const missingGateways = gateways.filter((gateway) => (
@@ -2190,7 +2205,10 @@ async function collectJumboHotfixEvidence(session, gatewaysResult) {
   if (missingGateways.length) {
     const fallbackResults = await Promise.all(missingGateways.map(async (gateway) => {
       const gatewayName = gateway.name || gateway.NAME || gateway.uid || "";
-      const fallback = await tryCommand(session, "show-software-packages-per-targets", { targets: [gatewayName] });
+      const fallback = await tryCommand(session, "show-software-packages-per-targets", {
+        display: { installed: "any", recommended: "any" },
+        targets: [gatewayName]
+      });
       const target = fallback.ok && Array.isArray(fallback.data?.targets) ? fallback.data.targets[0] : null;
       if (!target) errors.push({ gateway: gatewayName, error: fallback.error || batchResult.error || { error: "No software package data returned." } });
       return target;
@@ -2213,11 +2231,12 @@ async function collectJumboHotfixEvidence(session, gatewaysResult) {
         "Recommended Upgrade Package": "Gateway Returns No Data"
       };
     }
-    // show-gateways-and-servers is the reliable source for the installed
-    // gateway/member software version. Package inventory often omits its
-    // installed list, so use that only as a fallback.
+    // Request installed packages explicitly and translate Check Point's Jumbo
+    // bundle filename into a readable release and take. Fall back to the
+    // gateway/member version when no installed Jumbo package is returned.
+    const installedJumbo = installedJumboVersion(packages.installed);
     const objectVersion = gatewayInstalledVersion(gateway);
-    const installed = objectVersion !== "Not returned" ? objectVersion : packageListText(packages.installed);
+    const installed = installedJumbo || (objectVersion !== "Not returned" ? objectVersion : packageListText(packages.installed));
     const recommendedPackage = Array.isArray(packages.available)
       ? packages.available.find((pkg) => pkg.recommended === true || normalizeToken(pkg.recommended) === "true")
       : null;
@@ -3981,7 +4000,7 @@ function evaluateJumboHotfixAccumulator(result, session) {
       links: [{ label: "SK95746", url: "https://support.checkpoint.com/results/sk/sk95746" }]
     }],
     source: "Hardening guide: Updates, Health, and Ongoing Protection",
-    commands: ["show-simple-gateways/show-simple-clusters: name,version", "show-software-packages-per-targets: targets.1 Gateway_Object_NAME"],
+    commands: ["show-gateways-and-servers: name,version", "show-software-packages-per-targets: display.installed any, display.recommended any, targets.1 Gateway_Object_NAME"],
     review: !allRowsNoData && result.rows?.length ? {
       action: "mark-reviewed",
       label: "Mark as Reviewed",
