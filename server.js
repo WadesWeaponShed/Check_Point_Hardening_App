@@ -1540,11 +1540,21 @@ function isPasswordAuthenticationMethod(value) {
   return method === "check point password" || method === "os password" || method === "password";
 }
 
+function unsupportedApiCommandMessage(result, command) {
+  const error = result?.error || {};
+  const unsupported = error.statusCode === 404
+    && (error.response?.code === "generic_err_command_not_found" || /requested api command.*not found/i.test(String(error.error || "")));
+  return unsupported ? `API command ${command} is supported in R82.10 and up.` : "";
+}
+
+const MANUAL_HARDENING_GUIDE_STATE = "Please manually verify using the hardening guide.";
+
 function evaluateMfaIdentityProvider(defaultSettings, administrators, session) {
   const source = "Hardening guide: MFA and Identity Provider Integration";
   const rows = [];
   let defaultAuthenticationMethod = "";
   let failed = false;
+  const defaultSettingsManual = unsupportedApiCommandMessage(defaultSettings, "show-default-administrator-settings");
   const reviewHistory = appHistory.reviews.get("admin.mfa-idp") || null;
   const reviewedThisLogin = reviewHistory?.sessionId === session.id;
 
@@ -1556,11 +1566,11 @@ function evaluateMfaIdentityProvider(defaultSettings, administrators, session) {
       "Authentication-Method": defaultAuthenticationMethod || "Not returned"
     });
   } else {
-    failed = true;
+    failed = !defaultSettingsManual;
     rows.push({
       "Scope": "Default administrator settings",
       "Name": "Default",
-      "Authentication-Method": defaultSettings.error?.error || "Command failed"
+      "Authentication-Method": defaultSettingsManual || defaultSettings.error?.error || "Command failed"
     });
   }
 
@@ -1592,11 +1602,13 @@ function evaluateMfaIdentityProvider(defaultSettings, administrators, session) {
     category: "Administrator Identity and Access Control",
     title: "MFA And Identity Provider Integration",
     recommendation: "Check Point recommends setting up MFA for all environments, you can configure an external identity provider (IdP) for both SmartConsole/SmartDashboard administrator authentication and end-user Identity Awareness / Remote Access VPN. Check Point supports popular IdPs like Okta, Ping Identity, and Microsoft Entra ID (Azure AD) via the SAML protocol.",
-    status: failed ? "unknown" : (reviewedThisLogin ? "reviewed" : (remediationRecommended ? "remediation-recommended" : "needs-review")),
+    status: failed ? "unknown" : (defaultSettingsManual ? "manual" : (reviewedThisLogin ? "reviewed" : (remediationRecommended ? "remediation-recommended" : "needs-review"))),
     severity: remediationRecommended ? "high" : "medium",
     evidence: failed
       ? "One or more identity evidence commands failed."
-      : `${weakAdminCount} administrator account${weakAdminCount === 1 ? "" : "s"} returned with check point password or os password authentication.`,
+      : (defaultSettingsManual
+        ? MANUAL_HARDENING_GUIDE_STATE
+        : `${weakAdminCount} administrator account${weakAdminCount === 1 ? "" : "s"} returned with check point password or os password authentication.`),
     evidenceTable: rows.length ? {
       columns: ["Scope", "Name", "Authentication-Method"],
       rows
@@ -1607,7 +1619,7 @@ function evaluateMfaIdentityProvider(defaultSettings, administrators, session) {
       "show-default-administrator-settings: authentication-method",
       "show-administrators: name,authentication-method"
     ],
-    review: !failed ? {
+    review: !failed && !defaultSettingsManual ? {
       action: "mark-reviewed",
       label: "Mark as Reviewed",
       reviewedAt: reviewHistory?.reviewedAt || "",
@@ -1621,6 +1633,14 @@ function evaluateAdminPolicySettings(defaultSettings, idleTimeout, loginRestrict
   const source = "Hardening guide: Review administrator accounts, password policy, and idle timeout";
   const rows = [];
   const failed = [defaultSettings, idleTimeout, loginRestrictions, passwordRequirements].filter((result) => !result.ok);
+  const manualMessages = new Map([
+    [defaultSettings, unsupportedApiCommandMessage(defaultSettings, "show-default-administrator-settings")],
+    [idleTimeout, unsupportedApiCommandMessage(idleTimeout, "show-smart-console-idle-timeout")],
+    [loginRestrictions, unsupportedApiCommandMessage(loginRestrictions, "show-login-restrictions")],
+    [passwordRequirements, unsupportedApiCommandMessage(passwordRequirements, "show-cp-password-requirements")]
+  ]);
+  const manualResults = failed.filter((result) => manualMessages.get(result));
+  const unexpectedFailures = failed.filter((result) => !manualMessages.get(result));
   let needsRemediation = false;
   let needsReview = false;
   const reviewHistory = appHistory.reviews.get("admin.password-idle-lockout") || null;
@@ -1658,7 +1678,8 @@ function evaluateAdminPolicySettings(defaultSettings, idleTimeout, loginRestrict
       rows.push(settingRow("Days to notify expiration to admin", data["days-to-notify-expiration-to-admin"]));
     }
   } else {
-    rows.push(settingRow("Default administrator settings", defaultSettings.error?.error || "Command failed", "Unknown"));
+    const manual = manualMessages.get(defaultSettings);
+    rows.push(settingRow("Default administrator settings", manual || defaultSettings.error?.error || "Command failed", manual ? MANUAL_HARDENING_GUIDE_STATE : "Unknown"));
   }
 
   if (idleTimeout.ok) {
@@ -1681,7 +1702,8 @@ function evaluateAdminPolicySettings(defaultSettings, idleTimeout, loginRestrict
       rows.push(settingRow("SmartConsole idle timeout duration", data["timeout-duration"]));
     }
   } else {
-    rows.push(settingRow("SmartConsole idle timeout", idleTimeout.error?.error || "Command failed", "Unknown"));
+    const manual = manualMessages.get(idleTimeout);
+    rows.push(settingRow("SmartConsole idle timeout", manual || idleTimeout.error?.error || "Command failed", manual ? MANUAL_HARDENING_GUIDE_STATE : "Unknown"));
   }
 
   if (loginRestrictions.ok) {
@@ -1699,7 +1721,8 @@ function evaluateAdminPolicySettings(defaultSettings, idleTimeout, loginRestrict
     }
     rows.push(settingRow("Display access denied message", onOff(data["display-access-denied-message"])));
   } else {
-    rows.push(settingRow("Login restrictions", loginRestrictions.error?.error || "Command failed", "Unknown"));
+    const manual = manualMessages.get(loginRestrictions);
+    rows.push(settingRow("Login restrictions", manual || loginRestrictions.error?.error || "Command failed", manual ? MANUAL_HARDENING_GUIDE_STATE : "Unknown"));
   }
 
   if (passwordRequirements.ok) {
@@ -1719,10 +1742,11 @@ function evaluateAdminPolicySettings(defaultSettings, idleTimeout, loginRestrict
     }
     rows.push(passwordLengthRow);
   } else {
-    rows.push(settingRow("CP password requirements", passwordRequirements.error?.error || "Command failed", "Unknown"));
+    const manual = manualMessages.get(passwordRequirements);
+    rows.push(settingRow("CP password requirements", manual || passwordRequirements.error?.error || "Command failed", manual ? MANUAL_HARDENING_GUIDE_STATE : "Unknown"));
   }
 
-  const status = failed.length ? "unknown" : (reviewedThisLogin ? "reviewed" : (needsRemediation ? "remediation-required" : "needs-review"));
+  const status = unexpectedFailures.length ? "unknown" : (manualResults.length ? "manual" : (reviewedThisLogin ? "reviewed" : (needsRemediation ? "remediation-required" : "needs-review")));
   return makeCheck({
     id: "admin.password-idle-lockout",
     category: "Administrator Identity and Access Control",
@@ -1730,9 +1754,11 @@ function evaluateAdminPolicySettings(defaultSettings, idleTimeout, loginRestrict
     recommendation: "Use password length of at least 10 characters, disconnect SmartConsole after 10 minutes idle, expire admin access, and enable lockout.",
     status,
     severity: needsRemediation ? "high" : "medium",
-    evidence: failed.length
-      ? `${failed.length} administrator policy command${failed.length === 1 ? "" : "s"} failed.`
-      : "Administrator password, idle timeout, expiration, and lockout settings returned.",
+    evidence: unexpectedFailures.length
+      ? `${unexpectedFailures.length} administrator policy command${unexpectedFailures.length === 1 ? "" : "s"} failed.`
+      : (manualResults.length
+        ? MANUAL_HARDENING_GUIDE_STATE
+        : "Administrator password, idle timeout, expiration, and lockout settings returned."),
     evidenceTable: rows.length ? {
       columns: ["Setting", "Value", "State"],
       rows
@@ -4239,7 +4265,7 @@ function buildAccessLayerPackageLookup(packagesResult) {
   return lookup;
 }
 
-function accessLayersFromPackages(packagesResult) {
+function accessLayersFromPackages(packagesResult, options = {}) {
   const layers = [];
   const seen = new Set();
   if (!packagesResult?.ok) {
@@ -4259,7 +4285,9 @@ function accessLayersFromPackages(packagesResult) {
     const name = String(layer.name || layer.NAME || uid || "");
     if (!uid && !name) return;
     const { parentLayerUid, parentLayerName } = accessLayerParentInfo(layer);
-    const key = uid || `${packageName}:${normalizeToken(name)}`;
+    const key = options.preservePackageOccurrences
+      ? `${normalizeToken(packageName)}:${uid || normalizeToken(name)}`
+      : (uid || `${packageName}:${normalizeToken(name)}`);
     if (seen.has(key)) return;
     seen.add(key);
     layers.push({ uid, name, packageName, parentLayerUid, parentLayerName });
@@ -5267,7 +5295,27 @@ async function collectGatewayStealthRuleEvidence(session, gatewaysResult, packag
 async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServersResult, packagesResult, networksResult, addressRangesResult) {
   const loginManagement = resolveManagementObject(session, gatewaysAndServersResult);
   const loginIp = managementLoginHost(session) || firstIpv4(allIpv4Values(loginManagement.object).join(" "));
-  const domainIp = firstIpv4(session.domain || "");
+  const domainIdentity = String(session.domain || "").trim();
+  const globalSession = session.mdsMode ? globalDomainSession(session) : null;
+  const mdsSession = session.mdsMode && session.mdsSid ? { ...session, sid: session.mdsSid } : session;
+  const globalMdsServers = session.mdsMode
+    ? await tryListObjects(mdsSession, "show-mdss", { "details-level": "full" })
+    : null;
+  const globalPackages = session.mdsMode
+    ? await tryListObjects(globalSession, "show-packages", { "details-level": "full" })
+    : null;
+  const globalNetworks = session.mdsMode
+    ? await tryListObjects(globalSession, "show-networks", { "details-level": "full" })
+    : null;
+  const globalAddressRanges = session.mdsMode
+    ? await tryListObjects(globalSession, "show-address-ranges", { "details-level": "full" })
+    : null;
+  const globalHosts = session.mdsMode
+    ? await tryListObjects(globalSession, "show-hosts", { "details-level": "full" })
+    : null;
+  const globalAssignments = session.mdsMode
+    ? await tryListObjects(mdsSession, "show-global-assignments", { "details-level": "full" })
+    : null;
   const managementTargets = [];
   const rememberedTargetIps = new Set();
   function addManagementTarget(target, role) {
@@ -5285,26 +5333,64 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
       }
     });
   }
-  if (session.mdsMode && loginIp) {
-    addManagementTarget(resolveManagementObjectByIp(gatewaysAndServersResult, loginIp, session.managementObjectName || loginIp), "MDS management host");
+  if (session.mdsMode) {
+    const mdsIdentity = String(session.managementObjectName || "").trim() || loginIp;
+    addManagementTarget(resolveManagementObjectByIdentity(globalMdsServers, mdsIdentity, mdsIdentity), "MDS management host");
   } else {
     addManagementTarget({
       ...loginManagement,
       ip: loginIp
     }, "Management host");
   }
-  if (session.mdsMode && domainIp && domainIp !== loginIp) {
-    addManagementTarget(resolveManagementObjectByIp(gatewaysAndServersResult, domainIp, domainIp), "Domain management host");
+  if (session.mdsMode && domainIdentity) {
+    const localManagement = resolveManagementObjectByIdentity(gatewaysAndServersResult, domainIdentity, domainIdentity);
+    addManagementTarget(localManagement.matched ? localManagement : resolveDomainManagementFromMdss(globalMdsServers, domainIdentity), "Domain management host");
   }
+  const domainTarget = managementTargets.find((target) => target.role === "Domain management host");
+  const domainIdentityTokens = new Set([
+    domainIdentity,
+    domainTarget?.name,
+    domainTarget?.domain,
+    domainTarget?.ip
+  ].filter(Boolean).map(normalizeToken));
+  const matchingGlobalAssignments = (globalAssignments?.objects || []).filter((assignment) => {
+    const dependentDomain = assignment?.["dependent-domain"] || assignment?.dependentDomain || {};
+    const candidates = [dependentDomain.name, dependentDomain.uid, ...allIpv4Values(dependentDomain)];
+    return candidates.some((candidate) => domainIdentityTokens.has(normalizeToken(candidate)));
+  });
+  const assignedGlobalPolicyNames = uniqueStrings(matchingGlobalAssignments
+    .map((assignment) => objectDisplayName(assignment?.["global-access-policy"] || assignment?.globalAccessPolicy))
+    .filter(Boolean));
+  const assignedGlobalPolicyTokens = new Set(assignedGlobalPolicyNames.map(normalizeToken));
+  const assignedGlobalPackages = globalPackages?.ok ? {
+    ...globalPackages,
+    objects: (globalPackages.objects || []).filter((policyPackage) => assignedGlobalPolicyTokens.has(normalizeToken(policyPackage?.name || policyPackage?.NAME || policyPackage?.uid)))
+  } : globalPackages;
+  const globalAssignmentRows = matchingGlobalAssignments.map((assignment) => ({
+    "Dependent Domain": objectDisplayName(assignment?.["dependent-domain"] || assignment?.dependentDomain),
+    "Global Domain": objectDisplayName(assignment?.["global-domain"] || assignment?.globalDomain),
+    "Assigned Global Access Policy": objectDisplayName(assignment?.["global-access-policy"] || assignment?.globalAccessPolicy) || "None",
+    "Assignment Status": assignment?.["assignment-status"] || assignment?.assignmentStatus || "Not returned"
+  }));
   const managementName = managementTargets.map((target) => target.name).filter(Boolean).join(", ") || loginManagement.name || managementLoginHost(session) || session.baseUrl;
   const rowsByPolicy = new Map();
   const packageLookup = buildAccessLayerPackageLookup(packagesResult);
   const addedRows = new Set();
   const objectsByKey = new Map();
   const errors = [];
+  const globalPolicyObjectRefs = [];
+  const globalPolicyCoverageRows = [];
+  const globalObjectWhereUsed = new Map();
   const automaticNatRows = [];
   const translatedDestinationNatRows = [];
   const manualNatOriginalDestinations = new Map();
+  if (session.mdsMode && !globalAssignments?.ok) {
+    errors.push({ scope: "MDS global assignment discovery", command: "show-global-assignments", error: globalAssignments?.error });
+  } else if (session.mdsMode && !matchingGlobalAssignments.length) {
+    errors.push({ scope: "MDS global assignment discovery", command: "show-global-assignments", error: { error: `No Global assignment was found for domain ${domainIdentity || domainTarget?.name || "Unknown"}.` } });
+  } else if (session.mdsMode && assignedGlobalPolicyNames.length && assignedGlobalPackages?.ok && !assignedGlobalPackages.objects.length) {
+    errors.push({ scope: "Global domain", command: "show-packages", error: { error: `Assigned Global access policy ${assignedGlobalPolicyNames.join(", ")} was not returned by show-packages.` } });
+  }
   function addPolicyRow(policyName, row) {
     const key = `${policyName}:${row["Rule #"]}:${row.Source}:${row.Destination}:${row.Services}`;
     if (addedRows.has(key)) return;
@@ -5324,6 +5410,53 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
       "Object Type": objectType,
       "Details": details
     });
+  }
+  function rememberGlobalPolicyRef(ref, type, details) {
+    const key = ref?.uid || normalizeToken(ref?.name);
+    if (!key || globalPolicyObjectRefs.some((entry) => (entry.uid || normalizeToken(entry.name)) === key)) return;
+    globalPolicyObjectRefs.push({ name: ref.name || ref.uid || "", uid: ref.uid || "" });
+    rememberObject(ref, type, details);
+  }
+
+  async function collectGlobalPolicyObjects() {
+    if (!session.mdsMode) return;
+    for (const [command, result] of [["show-networks", globalNetworks], ["show-address-ranges", globalAddressRanges], ["show-hosts", globalHosts]]) {
+      if (!result?.ok) errors.push({ scope: "Global domain object discovery", command, error: result?.error });
+    }
+    for (const target of managementTargets) {
+      if (!target.ip) continue;
+      for (const host of (globalHosts?.objects || []).filter((object) => allIpv4Values(object).includes(target.ip))) {
+        rememberGlobalPolicyRef(host, "Global Host", `Global host object matching ${target.role} IP ${target.ip}`);
+      }
+      for (const network of matchingNetworkObjectsForIp(globalNetworks, target.ip)) {
+        rememberGlobalPolicyRef(network, "Global Network", `Global object containing ${target.role} IP ${target.ip} (${network.cidr.cidr})`);
+      }
+      for (const range of matchingAddressRangeObjectsForIp(globalAddressRanges, target.ip)) {
+        const first = range.range?.["ipv4-address-first"] || range.range?.ipv4AddressFirst || range.range?.from || range.range?.start || "";
+        const last = range.range?.["ipv4-address-last"] || range.range?.ipv4AddressLast || range.range?.to || range.range?.end || "";
+        rememberGlobalPolicyRef(range, "Global Address Range", `Global object containing ${target.role} IP ${target.ip} (${[first, last].filter(Boolean).join(" - ")})`);
+      }
+    }
+    const queue = [...globalPolicyObjectRefs];
+    const inspected = new Set();
+    while (queue.length && inspected.size < 100) {
+      const ref = queue.shift();
+      const lookupName = ref.name || ref.uid;
+      const key = ref.uid || normalizeToken(lookupName);
+      if (!lookupName || inspected.has(key)) continue;
+      inspected.add(key);
+      const usage = await tryCommand(globalSession, "where-used", { name: lookupName, "details-level": "full" });
+      if (!usage.ok) {
+        errors.push({ scope: "Global domain object expansion", object: lookupName, error: usage.error });
+        continue;
+      }
+      globalObjectWhereUsed.set(key, usage);
+      for (const group of whereUsedGroupReferences(usage.data, ref)) {
+        const before = globalPolicyObjectRefs.length;
+        rememberGlobalPolicyRef(group, "Global Group", `Global group containing ${lookupName}`);
+        if (globalPolicyObjectRefs.length > before) queue.push(group);
+      }
+    }
   }
   async function addGlobalParentRows(candidate) {
     const layerInfo = packageLookup.get(candidate.layerUid) || packageLookup.get(normalizeToken(candidate.layerName));
@@ -5351,6 +5484,167 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
     }
   }
 
+  function fieldContainsManagementIdentity(value, target) {
+    const refTokens = new Set(objectRefTokens([target.ref]));
+    function containsNestedRef(node) {
+      if (node === undefined || node === null) return false;
+      if (typeof node === "string" || typeof node === "number") {
+        return refTokens.has(normalizeToken(node));
+      }
+      if (Array.isArray(node)) return node.some(containsNestedRef);
+      if (typeof node === "object") {
+        if ([node.name, node.uid, node.NAME, node.UID].filter(Boolean).some((candidate) => refTokens.has(normalizeToken(candidate)))) return true;
+        const referenceKeys = new Set(["object", "objects", "value", "values", "member", "members", "reference", "references", "destination", "destinations"]);
+        return Object.entries(node).some(([key, child]) => referenceKeys.has(normalizeToken(key)) && containsNestedRef(child));
+      }
+      return false;
+    }
+    if (fieldContainsObjectRef(value, target.ref) || containsNestedRef(value)) return true;
+    const targetIp = target.ip || firstIpv4(allIpv4Values(target.object).join(" "));
+    if (!targetIp) return false;
+    function containsDirectIp(node) {
+      if (node === undefined || node === null) return false;
+      if (typeof node === "string" || typeof node === "number") return firstIpv4(node) === targetIp;
+      if (Array.isArray(node)) return node.some(containsDirectIp);
+      if (typeof node !== "object") return false;
+      const addressKeys = new Set(["ipv4address", "ipaddress"]);
+      const referenceKeys = new Set(["object", "objects", "value", "values", "member", "members", "reference", "references", "destination", "destinations"]);
+      return Object.entries(node).some(([key, child]) => addressKeys.has(normalizeToken(key))
+        ? firstIpv4(child) === targetIp
+        : (referenceKeys.has(normalizeToken(key)) && containsDirectIp(child)));
+    }
+    return containsDirectIp(value);
+  }
+
+  async function collectDirectGlobalRules() {
+    if (!session.mdsMode) return;
+    if (!globalMdsServers?.ok) {
+      errors.push({ scope: "Global domain", command: "show-mdss", error: globalMdsServers?.error });
+      return;
+    }
+    if (!assignedGlobalPackages?.ok) {
+      errors.push({ scope: "Global domain", command: "show-packages", error: assignedGlobalPackages?.error });
+      return;
+    }
+    const targets = [
+      ...managementTargets.filter((target) => target.role === "MDS management host" || target.role === "Domain management host"),
+      ...globalPolicyObjectRefs.map((ref) => ({ name: ref.name, ref }))
+    ];
+    for (const layer of accessLayersFromPackages(assignedGlobalPackages, { preservePackageOccurrences: true })) {
+      const layerLookupName = layer.uid || layer.name;
+      if (!layerLookupName) continue;
+      let layerMatches = 0;
+      let layerFailed = false;
+      let offset = 0;
+      for (let page = 0; page < 100; page += 1) {
+        const rulebase = await tryCommand(globalSession, "show-access-rulebase", {
+          name: layerLookupName,
+          "details-level": "full",
+          limit: 500,
+          offset
+        });
+        if (!rulebase.ok) {
+          layerFailed = true;
+          errors.push({ scope: "Global domain", layer: layerLookupName, offset, error: rulebase.error });
+          break;
+        }
+        const dictionary = objectDictionaryMap(rulebase.data);
+        const layerName = rulebase.data?.name || layer.name || layerLookupName;
+        const policyName = `Global Policy: ${layer.packageName || "Unnamed package"} / ${layerName}`;
+        for (const rule of flattenAccessRulebaseRules(rulebase.data?.rulebase || [])) {
+          const resolvedRule = accessRuleWithDictionary(rule, dictionary);
+          const destination = ruleField(resolvedRule, "destination", "destinations");
+          const matchedTargets = targets.filter((target) => fieldContainsManagementIdentity(destination, target));
+          if (!matchedTargets.length) continue;
+          layerMatches += 1;
+          addPolicyRow(policyName, {
+            ...accessRuleEvidenceRow(resolvedRule, "", accessRuleNumber(resolvedRule), { includeGateway: false }),
+            "Rule Name": resolvedRule.name || `Direct reference to ${matchedTargets.map((target) => target.name).join(", ")}`
+          });
+        }
+        const total = Number(rulebase.data?.total || 0);
+        const to = Number(rulebase.data?.to || 0);
+        if (!total || to >= total || !(rulebase.data?.rulebase || []).length) break;
+        const nextOffset = to > offset ? to : offset + 500;
+        if (nextOffset <= offset) break;
+        offset = nextOffset;
+      }
+      globalPolicyCoverageRows.push({
+        "Global Policy Package": layer.packageName || "Unnamed package",
+        "Access Layer": layer.name || layer.uid || "Unnamed layer",
+        "Matches": layerMatches,
+        "Search Status": layerFailed ? "Failed" : "Searched"
+      });
+    }
+  }
+
+  async function collectAssignedGlobalWhereUsedRules() {
+    if (!session.mdsMode || !assignedGlobalPackages?.ok) return;
+    const assignedLayers = accessLayersFromPackages(assignedGlobalPackages, { preservePackageOccurrences: true });
+    const allowedLayerTokens = new Set(assignedLayers.flatMap((layer) => [layer.uid, layer.name].filter(Boolean).map(normalizeToken)));
+    const assignedPackageLookup = buildAccessLayerPackageLookup(assignedGlobalPackages);
+    for (const ref of globalPolicyObjectRefs) {
+      const lookupName = ref.name || ref.uid;
+      const key = ref.uid || normalizeToken(lookupName);
+      if (!lookupName) continue;
+      const usage = globalObjectWhereUsed.get(key) || await tryCommand(globalSession, "where-used", { name: lookupName, "details-level": "full" });
+      if (!usage.ok) {
+        errors.push({ scope: "Assigned Global policy", object: lookupName, error: usage.error });
+        continue;
+      }
+      for (const candidate of whereUsedAccessRuleCandidates(usage.data, ref)) {
+        const candidateTokens = [candidate.layerUid, candidate.layerName].filter(Boolean).map(normalizeToken);
+        if (!candidateTokens.some((token) => allowedLayerTokens.has(token))) continue;
+        const assignedLayer = assignedLayers.find((layer) => [layer.uid, layer.name].filter(Boolean).map(normalizeToken).some((token) => candidateTokens.includes(token)));
+        const ruleResult = await fetchAccessRuleEvidence(globalSession, lookupName, candidate, assignedPackageLookup, candidate.ruleNumber);
+        if (!ruleResult.ok) {
+          errors.push({ scope: "Assigned Global policy", object: lookupName, layer: candidate.layerName || candidate.layerUid, ruleNumber: candidate.ruleNumber, error: ruleResult.error });
+          continue;
+        }
+        addPolicyRow(`Global Policy: ${assignedLayer?.packageName || "Assigned"} / ${assignedLayer?.name || candidate.layerName || candidate.layerUid || "Access Policy"}`, ruleResult.row);
+      }
+    }
+  }
+
+  async function collectDirectLocalRules() {
+    if (!session.mdsMode || !packagesResult?.ok) return;
+    const targets = [
+      ...managementTargets.filter((target) => target.role === "MDS management host" || target.role === "Domain management host"),
+      ...globalPolicyObjectRefs.map((ref) => ({ name: ref.name, ref }))
+    ];
+    for (const layer of accessLayersFromPackages(packagesResult)) {
+      const layerLookupName = layer.uid || layer.name;
+      if (!layerLookupName) continue;
+      let offset = 0;
+      for (let page = 0; page < 100; page += 1) {
+        const rulebase = await tryCommand(session, "show-access-rulebase", { name: layerLookupName, "details-level": "full", limit: 500, offset });
+        if (!rulebase.ok) {
+          errors.push({ scope: "Local domain", layer: layerLookupName, offset, error: rulebase.error });
+          break;
+        }
+        const dictionary = objectDictionaryMap(rulebase.data);
+        const layerName = rulebase.data?.name || layer.name || layerLookupName;
+        const policyName = policyPackageLabel(layerName, rulebase.data?.uid || layer.uid || "", packageLookup);
+        for (const rule of flattenAccessRulebaseRules(rulebase.data?.rulebase || [])) {
+          const resolvedRule = accessRuleWithDictionary(rule, dictionary);
+          const destination = ruleField(resolvedRule, "destination", "destinations");
+          const matchedTargets = targets.filter((target) => fieldContainsManagementIdentity(destination, target));
+          if (!matchedTargets.length) continue;
+          addPolicyRow(policyName, {
+            ...accessRuleEvidenceRow(resolvedRule, "", accessRuleNumber(resolvedRule), { includeGateway: false }),
+            "Rule Name": resolvedRule.name || `Direct reference to ${matchedTargets.map((target) => target.name).join(", ")}`
+          });
+        }
+        const total = Number(rulebase.data?.total || 0);
+        const to = Number(rulebase.data?.to || 0);
+        if (!total || to >= total || !(rulebase.data?.rulebase || []).length) break;
+        const nextOffset = to > offset ? to : offset + 500;
+        if (nextOffset <= offset) break;
+        offset = nextOffset;
+      }
+    }
+  }
+
   if (!gatewaysAndServersResult.ok) {
     return {
       ok: false,
@@ -5365,7 +5659,9 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
   async function addRulesFromWhereUsed(whereUsedResult, lookupName) {
     const candidates = whereUsedAccessRuleCandidates(whereUsedResult.data, { name: lookupName });
     await Promise.all(candidates.map(async (candidate) => {
-      await addGlobalParentRows(candidate);
+      // MDS scans enumerate every Global-domain policy directly below. Avoid
+      // adding unrelated rules merely because they precede a domain placeholder.
+      if (!session.mdsMode) await addGlobalParentRows(candidate);
       const ruleResult = await fetchAccessRuleEvidence(session, managementName, candidate, packageLookup, candidate.ruleNumber);
       if (!ruleResult.ok) {
         errors.push({
@@ -5411,6 +5707,16 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
   for (const target of managementTargets) {
     const targetName = target.name;
     const targetIp = target.ip;
+    if (target.role === "MDS management host") {
+      rememberObject(
+        target.ref,
+        target.matched ? "MDS Server (Global Domain)" : "MDS Server Hostname",
+        target.matched
+          ? `MDS object${targetIp ? ` (${targetIp})` : ""}; checked against the Global access policy assigned to this domain and this domain's local policies.`
+          : `No Global-domain MDS object matching ${targetName} was returned.`
+      );
+      continue;
+    }
     if (target.matched && targetName) {
       const whereUsed = await tryCommand(session, "where-used", {
         name: targetName,
@@ -5440,6 +5746,11 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
       await processObjectUsage(range);
     }
   }
+
+  await collectGlobalPolicyObjects();
+  await collectDirectLocalRules();
+  await collectDirectGlobalRules();
+  await collectAssignedGlobalWhereUsedRules();
 
   for (const target of managementTargets) {
     const natSettings = target.object?.["nat-settings"] || target.object?.natSettings;
@@ -5561,6 +5872,8 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
     automaticNatRows,
     translatedDestinationNatRows,
     manualNatOriginalDestinationCount: manualNatOriginalDestinations.size,
+    globalPolicyCoverageRows,
+    globalAssignmentRows,
     errors
   };
 }
@@ -5662,7 +5975,7 @@ function matchingNetworkObjectsForIp(networksResult, ip) {
       uid: network.uid || "",
       cidr: networkObjectCidrInfo(network)
     }))
-    .filter((network) => network.name && network.cidr && networkContainsIp(network.cidr, ip));
+    .filter((network) => network.name && network.cidr && network.cidr.prefixLength > 0 && networkContainsIp(network.cidr, ip));
 }
 
 function addressRangeContainsIp(range, ip) {
@@ -5681,7 +5994,11 @@ function matchingAddressRangeObjectsForIp(addressRangesResult, ip) {
       uid: range.uid || "",
       range
     }))
-    .filter((range) => range.name && addressRangeContainsIp(range.range, ip));
+    .filter((range) => {
+      const first = range.range?.["ipv4-address-first"] || range.range?.ipv4AddressFirst || range.range?.from || range.range?.start;
+      const last = range.range?.["ipv4-address-last"] || range.range?.ipv4AddressLast || range.range?.to || range.range?.end;
+      return range.name && !(first === "0.0.0.0" && last === "255.255.255.255") && addressRangeContainsIp(range.range, ip);
+    });
 }
 
 function allIpv4Values(value) {
@@ -5911,6 +6228,63 @@ function resolveManagementObjectByIp(gatewaysAndServersResult, ip, fallbackName 
     object: match || null,
     ip
   };
+}
+
+function resolveManagementObjectByIdentity(gatewaysAndServersResult, identity, fallbackName = "") {
+  const value = String(identity || "").trim();
+  const ip = firstIpv4(value);
+  if (ip) {
+    return resolveManagementObjectByIp(gatewaysAndServersResult, ip, fallbackName || value);
+  }
+  if (!value || !gatewaysAndServersResult?.ok) {
+    return {
+      name: fallbackName || value,
+      matched: false,
+      object: null,
+      ip: ""
+    };
+  }
+  const token = normalizeToken(value);
+  const match = (gatewaysAndServersResult.objects || []).find((object) => (
+    [object?.name, object?.NAME, object?.uid, object?.UID]
+      .filter(Boolean)
+      .some((candidate) => normalizeToken(candidate) === token)
+  ));
+  return {
+    name: match?.name || match?.NAME || fallbackName || value,
+    matched: Boolean(match),
+    object: match || null,
+    ip: firstIpv4(allIpv4Values(match).join(" "))
+  };
+}
+
+function resolveDomainManagementFromMdss(mdssResult, identity) {
+  const value = String(identity || "").trim();
+  const token = normalizeToken(value);
+  const ip = firstIpv4(value);
+  if (!value || !mdssResult?.ok) return { name: value, matched: false, object: null, ip };
+  for (const mds of mdssResult.objects || []) {
+    for (const domain of Array.isArray(mds?.domains) ? mds.domains : []) {
+      const servers = Array.isArray(domain?.servers) ? domain.servers : [];
+      const domainMatches = [domain?.name, domain?.uid].filter(Boolean).some((candidate) => normalizeToken(candidate) === token);
+      const serverMatch = servers.find((server) => (
+        [server?.name, server?.uid].filter(Boolean).some((candidate) => normalizeToken(candidate) === token)
+        || (ip && allIpv4Values(server).includes(ip))
+      ));
+      if (!domainMatches && !serverMatch) continue;
+      const server = serverMatch || servers.find((candidate) => candidate?.active === true) || servers[0];
+      if (!server) break;
+      return {
+        name: server.name || domain.name || value,
+        matched: true,
+        object: server,
+        ip: firstIpv4(allIpv4Values(server).join(" ")),
+        domain: domain.name || "",
+        mds: mds.name || ""
+      };
+    }
+  }
+  return { name: value, matched: false, object: null, ip };
 }
 
 function resolveManagementRunScriptTarget(session, gatewaysAndServersResult) {
@@ -6309,7 +6683,7 @@ function evaluateAdministrativeSourceIpAddresses(result, session) {
       ? `${result.managementName} is being NATed. Include the translated address in the administrative exposure review and restrict access to approved source IP addresses.`
       : "",
     source,
-    commands: ["show-gateways-and-servers: resolve management object name and inspect nat-settings", "show-networks: networks containing management IP", "show-address-ranges: address ranges containing management IP", "where-used: management object, manual NAT Original Destination objects, matching network/address range objects, and related groups", "show-packages: access and NAT policy packages", "show-access-rule: source,destination,service,action,track", "show-nat-rulebase: translated-destination usage of the Management Server object"],
+    commands: ["show-mdss (MDS root session): resolve the physical MDS object and domain management servers", "show-global-assignments: resolve the Global access policy assigned to the scanned domain", "show-gateways-and-servers: resolve the domain management object and inspect nat-settings", "show-networks: networks containing management IP", "show-address-ranges: address ranges containing management IP", "where-used: management object, manual NAT Original Destination objects, matching network/address range objects, and related groups", "show-packages: local policies and the assigned Global access policy", "show-access-rulebase: direct MDS and domain-management references in applicable policies", "show-access-rule: source,destination,service,action,track", "show-nat-rulebase: translated-destination usage of the Management Server object"],
     review: result.ok ? {
       action: "mark-reviewed",
       label: "Mark as Reviewed",
