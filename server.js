@@ -5298,24 +5298,28 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
   const domainIdentity = String(session.domain || "").trim();
   const globalSession = session.mdsMode ? globalDomainSession(session) : null;
   const mdsSession = session.mdsMode && session.mdsSid ? { ...session, sid: session.mdsSid } : session;
-  const globalMdsServers = session.mdsMode
-    ? await tryListObjects(mdsSession, "show-mdss", { "details-level": "full" })
-    : null;
-  const globalPackages = session.mdsMode
-    ? await tryListObjects(globalSession, "show-packages", { "details-level": "full" })
-    : null;
-  const globalNetworks = session.mdsMode
-    ? await tryListObjects(globalSession, "show-networks", { "details-level": "full" })
-    : null;
-  const globalAddressRanges = session.mdsMode
-    ? await tryListObjects(globalSession, "show-address-ranges", { "details-level": "full" })
-    : null;
-  const globalHosts = session.mdsMode
-    ? await tryListObjects(globalSession, "show-hosts", { "details-level": "full" })
-    : null;
-  const globalAssignments = session.mdsMode
-    ? await tryListObjects(mdsSession, "show-global-assignments", { "details-level": "full" })
-    : null;
+  const loadMdsGlobalInventory = () => Promise.all([
+    tryListObjects(mdsSession, "show-mdss", { "details-level": "full" }),
+    tryListObjects(globalSession, "show-packages", { "details-level": "full" }),
+    tryListObjects(globalSession, "show-networks", { "details-level": "full" }),
+    tryListObjects(globalSession, "show-address-ranges", { "details-level": "full" }),
+    tryListObjects(globalSession, "show-hosts", { "details-level": "full" }),
+    tryListObjects(mdsSession, "show-global-assignments", { "details-level": "full" })
+  ]);
+  let mdsGlobalInventory = [null, null, null, null, null, null];
+  if (session.mdsMode) {
+    const cacheOwner = session.moraRootSession;
+    const scanToken = session.moraProgress?.parent?.scanProgress?.startedAt || "";
+    if (cacheOwner && scanToken) {
+      if (cacheOwner.moraAdminSourceGlobalInventory?.scanToken !== scanToken) {
+        cacheOwner.moraAdminSourceGlobalInventory = { scanToken, promise: loadMdsGlobalInventory() };
+      }
+      mdsGlobalInventory = await cacheOwner.moraAdminSourceGlobalInventory.promise;
+    } else {
+      mdsGlobalInventory = await loadMdsGlobalInventory();
+    }
+  }
+  const [globalMdsServers, globalPackages, globalNetworks, globalAddressRanges, globalHosts, globalAssignments] = mdsGlobalInventory;
   const managementTargets = [];
   const rememberedTargetIps = new Set();
   function addManagementTarget(target, role) {
@@ -5366,12 +5370,6 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
     ...globalPackages,
     objects: (globalPackages.objects || []).filter((policyPackage) => assignedGlobalPolicyTokens.has(normalizeToken(policyPackage?.name || policyPackage?.NAME || policyPackage?.uid)))
   } : globalPackages;
-  const globalAssignmentRows = matchingGlobalAssignments.map((assignment) => ({
-    "Dependent Domain": objectDisplayName(assignment?.["dependent-domain"] || assignment?.dependentDomain),
-    "Global Domain": objectDisplayName(assignment?.["global-domain"] || assignment?.globalDomain),
-    "Assigned Global Access Policy": objectDisplayName(assignment?.["global-access-policy"] || assignment?.globalAccessPolicy) || "None",
-    "Assignment Status": assignment?.["assignment-status"] || assignment?.assignmentStatus || "Not returned"
-  }));
   const managementName = managementTargets.map((target) => target.name).filter(Boolean).join(", ") || loginManagement.name || managementLoginHost(session) || session.baseUrl;
   const rowsByPolicy = new Map();
   const packageLookup = buildAccessLayerPackageLookup(packagesResult);
@@ -5379,7 +5377,6 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
   const objectsByKey = new Map();
   const errors = [];
   const globalPolicyObjectRefs = [];
-  const globalPolicyCoverageRows = [];
   const globalObjectWhereUsed = new Map();
   const automaticNatRows = [];
   const translatedDestinationNatRows = [];
@@ -5533,8 +5530,6 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
     for (const layer of accessLayersFromPackages(assignedGlobalPackages, { preservePackageOccurrences: true })) {
       const layerLookupName = layer.uid || layer.name;
       if (!layerLookupName) continue;
-      let layerMatches = 0;
-      let layerFailed = false;
       let offset = 0;
       for (let page = 0; page < 100; page += 1) {
         const rulebase = await tryCommand(globalSession, "show-access-rulebase", {
@@ -5544,7 +5539,6 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
           offset
         });
         if (!rulebase.ok) {
-          layerFailed = true;
           errors.push({ scope: "Global domain", layer: layerLookupName, offset, error: rulebase.error });
           break;
         }
@@ -5556,7 +5550,6 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
           const destination = ruleField(resolvedRule, "destination", "destinations");
           const matchedTargets = targets.filter((target) => fieldContainsManagementIdentity(destination, target));
           if (!matchedTargets.length) continue;
-          layerMatches += 1;
           addPolicyRow(policyName, {
             ...accessRuleEvidenceRow(resolvedRule, "", accessRuleNumber(resolvedRule), { includeGateway: false }),
             "Rule Name": resolvedRule.name || `Direct reference to ${matchedTargets.map((target) => target.name).join(", ")}`
@@ -5569,12 +5562,6 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
         if (nextOffset <= offset) break;
         offset = nextOffset;
       }
-      globalPolicyCoverageRows.push({
-        "Global Policy Package": layer.packageName || "Unnamed package",
-        "Access Layer": layer.name || layer.uid || "Unnamed layer",
-        "Matches": layerMatches,
-        "Search Status": layerFailed ? "Failed" : "Searched"
-      });
     }
   }
 
@@ -5748,8 +5735,7 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
   }
 
   await collectGlobalPolicyObjects();
-  await collectDirectLocalRules();
-  await collectDirectGlobalRules();
+  await Promise.all([collectDirectLocalRules(), collectDirectGlobalRules()]);
   await collectAssignedGlobalWhereUsedRules();
 
   for (const target of managementTargets) {
@@ -5872,8 +5858,6 @@ async function collectAdministrativeSourceIpEvidence(session, gatewaysAndServers
     automaticNatRows,
     translatedDestinationNatRows,
     manualNatOriginalDestinationCount: manualNatOriginalDestinations.size,
-    globalPolicyCoverageRows,
-    globalAssignmentRows,
     errors
   };
 }
@@ -6176,7 +6160,8 @@ function globalDomainSession(session) {
   }
   return {
     ...session,
-    sid: session.globalDomainSid
+    sid: session.globalDomainSid,
+    scanCommandCache: session.moraRootSession?.moraGlobalCommandCache || session.moraGlobalCommandCache || session.scanCommandCache
   };
 }
 
@@ -8102,6 +8087,8 @@ async function scanMoraHardening(session) {
     throw new Error("The all-domain scan has no discovered domains. Log in again and retry.");
   }
   const startedAt = new Date().toISOString();
+  session.moraGlobalCommandCache = new Map();
+  session.moraAdminSourceGlobalInventory = null;
   session.scanProgress = {
     active: true,
     failed: false,
@@ -8180,6 +8167,8 @@ async function scanMoraHardening(session) {
       : `Completed all ${successful.length} domain scans`,
     completedAt: new Date().toISOString()
   };
+  session.moraGlobalCommandCache = null;
+  session.moraAdminSourceGlobalInventory = null;
   return result;
 }
 
