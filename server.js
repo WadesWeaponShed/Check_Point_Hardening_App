@@ -712,21 +712,7 @@ async function login(payload) {
     if (!discoveredDomains.length) {
       throw new Error("The all-domain scan did not find any active MDS domains available to this administrator.");
     }
-    for (const domain of discoveredDomains) {
-      try {
-        const domainLoginBody = { domain: domain.name };
-        if (authMode === "api-key") {
-          domainLoginBody["api-key"] = loginBody["api-key"];
-        } else {
-          domainLoginBody.user = loginBody.user;
-          domainLoginBody.password = loginBody.password;
-        }
-        const domainLogin = await cpRequest(session, "login", domainLoginBody);
-        moraDomains.push({ ...domain, sid: domainLogin.sid || "", loginError: domainLogin.sid ? null : { error: domainLogin.message || "Domain login did not return a session ID." } });
-      } catch (error) {
-        moraDomains.push({ ...domain, sid: "", loginError: commandError(error) });
-      }
-    }
+    moraDomains = discoveredDomains;
   }
   const loginUser = loginBody.user || "API Key";
   const id = randomUUID();
@@ -746,6 +732,7 @@ async function login(payload) {
     moraMode,
     customerName: session.customerName,
     managementObjectName: session.managementObjectName,
+    moraAuth: moraMode ? { ...loginBody, domain: undefined } : null,
     createdAt: Date.now(),
     lastHardeningScan: null
   };
@@ -753,17 +740,8 @@ async function login(payload) {
     name: domain.name,
     uid: domain.uid,
     servers: domain.servers,
-    loginError: domain.loginError,
-    session: domain.sid ? {
-      ...rootSession,
-      id: `${id}:domain:${index}`,
-      sid: domain.sid,
-      domain: domain.name,
-      moraMode: true,
-      moraRootSession: rootSession,
-      moraDomains: undefined,
-      lastHardeningScan: null
-    } : null
+    loginError: null,
+    session: null
   }));
   sessions.set(id, rootSession);
   return {
@@ -774,7 +752,7 @@ async function login(payload) {
     smart1Cloud: session.smart1Cloud,
     mdsMode: session.mdsMode,
     moraMode,
-    domains: rootSession.moraDomains.map((domain) => ({ name: domain.name, uid: domain.uid, available: Boolean(domain.session) })),
+    domains: rootSession.moraDomains.map((domain) => ({ name: domain.name, uid: domain.uid, available: true })),
     managementObjectName: session.managementObjectName
   };
 }
@@ -8127,31 +8105,49 @@ async function scanMoraHardening(session) {
     session.scanProgress.currentDomainIndex = index + 1;
     session.scanProgress.currentStep = `Domain ${index + 1} of ${domains.length}: ${domain.name}`;
     session.scanProgress.percent = Math.max(1, Math.round((index / domains.length) * 100));
-    if (!domain.session || domain.loginError) {
-      domainResults.push({
-        name: domain.name,
-        uid: domain.uid,
-        error: domain.loginError?.error || "Domain login was unavailable.",
-        scan: null
-      });
-      continue;
-    }
-    domain.session.moraProgress = {
-      parent: session,
-      index,
-      total: domains.length,
-      domainName: domain.name
-    };
     try {
+      const domainLogin = await cpRequest({
+        baseUrl: session.baseUrl,
+        smart1Cloud: session.smart1Cloud,
+        rejectUnauthorized: session.rejectUnauthorized
+      }, "login", { ...session.moraAuth, domain: domain.name });
+      if (!domainLogin.sid) {
+        throw new Error(domainLogin.message || "Domain login did not return a session ID.");
+      }
+      domain.loginError = null;
+      domain.session = {
+        ...session,
+        id: `${session.id}:domain:${index}`,
+        sid: domainLogin.sid,
+        domain: domain.name,
+        moraAuth: undefined,
+        moraRootSession: session,
+        moraDomains: undefined,
+        lastHardeningScan: null,
+        moraProgress: { parent: session, index, total: domains.length, domainName: domain.name }
+      };
       const scan = await scanHardening(domain.session);
       domainResults.push({ name: domain.name, uid: domain.uid, error: "", scan });
     } catch (error) {
       if (error.code === "SCAN_CANCELLED") throw error;
       domainResults.push({ name: domain.name, uid: domain.uid, error: error.message || "Domain scan failed.", scan: null });
     } finally {
-      domain.session.moraProgress = null;
-      domain.session.scanCommandCache = null;
-      domain.session.scanApiQueue = null;
+      if (domain.session) {
+        const sid = domain.session.sid;
+        try {
+          // Cleanup must still run when the scan operation was cancelled.
+          await operationContext.run(undefined, () => cpRequest({
+            baseUrl: session.baseUrl,
+            smart1Cloud: session.smart1Cloud,
+            rejectUnauthorized: session.rejectUnauthorized,
+            sid
+          }, "logout", {}));
+        } catch (error) {
+          log("Domain logout request failed", { domain: domain.name, error: error.message });
+        } finally {
+          domain.session = null;
+        }
+      }
     }
     session.scanProgress.percent = Math.round(((index + 1) / domains.length) * 100);
   }
