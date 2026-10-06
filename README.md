@@ -129,3 +129,29 @@ share the deadline; their existing polling intervals and concurrency limits rema
 A poll request already in flight is still subject to the API request timeout.
 Timeouts do not resubmit or cancel the remote script. Debug results include the
 affected target and an explicit timeout message instead of only a lookup count.
+
+### Debugging interrupted scans
+
+Scan diagnostics are written incrementally, independently of the completed report.
+The complete scan journal remains downloadable through failures and reauthentication,
+until explicit app logout deletes its file and clears server and browser records.
+It contains scan API request starts, outcomes, domains, timing, and redacted errors;
+non-scan browser activity is not journaled. Download during the scan or in the reconnect
+dialog. Journals accumulate across scans until logout without truncation or idle expiry.
+The console prints the private temporary `scan.jsonl` path at scan start. If the app
+process exits, that file remains for manual collection; a restarted backend does not
+reload it. Cached browser records remain available while the page stays open.
+
+Reauthentication creates fresh sessions. Interrupted scans are not resumed or silently
+restarted. Start another scan explicitly after reconnecting; earlier debug records
+remain available. HTTP 403 alone no longer triggers session reauthentication.
+
+### Check Point API session idle timeout
+
+Every login requests `session-timeout: 3600` (one hour), including CMA, MDS,
+Global, System Data, and reconnect logins. Set `CP_SESSION_TIMEOUT_SECONDS` before
+starting the app to override this value. This setting uses seconds and is independent
+of the per-request timeouts, which use milliseconds. The server's login response
+determines the granted idle lifetime; the console records requested and returned
+values, and scan debug records include login timeout information. Existing sessions
+require a new login for this setting to apply.

@@ -88,10 +88,12 @@ test('busy state locks the full workbench subtree, including non-button filters'
   const attributes = {};
   const checksList = {setAttribute:(key, value) => attributes[key] = value};
   const button = {disabled:false,closest:()=>null};
+  const debugButton = {id:"downloadDebugLogButton",disabled:false,closest:()=>null};
   const setBusy = vm.runInNewContext(`${source.slice(source.indexOf('function setBusy('),source.indexOf('function setScanInProgress('))};setBusy`,{
-    checksList, document:{querySelectorAll:()=>[button]}
+    checksList, document:{querySelectorAll:()=>[button,debugButton]}
   });
   setBusy(true);
+  assert.equal(debugButton.disabled,false);
   assert.equal(checksList.inert,true); assert.equal(attributes['aria-busy'],'true'); assert.equal(button.disabled,true);
   setBusy(false);
   assert.equal(checksList.inert,false); assert.equal(button.disabled,false);

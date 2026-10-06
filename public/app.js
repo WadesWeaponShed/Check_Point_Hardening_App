@@ -81,6 +81,37 @@ let reauthPromise = null;
 let reauthResolve = null;
 let reauthReject = null;
 let scanProgressTimer = null;
+const browserDebugId = sessionStorage.getItem("cp-browser-debug-id") || (globalThis.crypto?.randomUUID?.() || "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => { const n = Math.floor(Math.random() * 16); return (c === "x" ? n : (n & 3) | 8).toString(16); }));
+sessionStorage.setItem("cp-browser-debug-id", browserDebugId);
+let debugSessionId = "";
+let liveScanDebug = null;
+let debugFetchPending = null;
+const reauthDebugButton = document.createElement("button");
+reauthDebugButton.type = "button";
+reauthDebugButton.textContent = "Download debug log";
+reauthDebugButton.addEventListener("click", () => downloadDebugLog());
+reauthStatus.after(reauthDebugButton);
+
+async function collectLiveDebug() {
+  if (debugFetchPending) return debugFetchPending;
+  debugFetchPending = (async () => {
+    const response = await fetch("/api/scan-debug", {
+      method: "POST", headers: {"content-type": "application/json"},
+      body: JSON.stringify({debugId: browserDebugId, sessionId: debugSessionId || sessionId, offset: liveScanDebug?.nextOffset || 0})
+    });
+    if (!response.ok) throw new Error("Unable to retrieve live debug log.");
+    const data = await response.json();
+    if (!data.debug) return;
+    if (liveScanDebug && liveScanDebug.scanId !== data.debug.scanId) {
+      liveScanDebug = null;
+      return; // Next poll fetches the new journal from offset zero.
+    }
+    const previous = liveScanDebug?.commandLog || [];
+    liveScanDebug = {...data.debug, progress: data.progress, commandLog: [...previous, ...data.debug.commandLog]};
+    downloadDebugLogButton.disabled = false;
+  })().finally(() => { debugFetchPending = null; });
+  return debugFetchPending;
+}
 
 function setBusy(isBusy) {
   // The workbench holds inactive cards off-document. Lock its entire subtree,
@@ -88,7 +119,7 @@ function setBusy(isBusy) {
   checksList.inert = isBusy;
   checksList.setAttribute("aria-busy", String(isBusy));
   document.querySelectorAll("button").forEach((button) => {
-    if (!button.closest("#reauthOverlay")) {
+    if (button.id !== "downloadDebugLogButton" && !button.closest("#reauthOverlay")) {
       button.disabled = isBusy;
     }
   });
@@ -125,7 +156,7 @@ function setScanInProgress(isScanning) {
       <div class="command-row command-row-pending">
         <span class="badge unknown">Running</span>
         <code>/api/scan</code>
-        <span>Command details will appear here when the scan completes.</span>
+        <span>Debug records are saved as commands run. Download the log at any time.</span>
       </div>
     `;
   }
@@ -190,6 +221,7 @@ function startScanProgressPolling() {
     try {
       const result = await api("/api/scan-progress", { sessionId });
       renderScanProgress(result.progress || {});
+      await collectLiveDebug();
       if (result.progress?.complete || result.progress?.failed) {
         stopScanProgressPolling();
       }
@@ -517,11 +549,11 @@ function safeDownloadFilenamePart(value) {
     .slice(0, 100);
 }
 
-async function api(path, payload) {
+async function api(path, payload, allowReauth = true) {
   const response = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({...payload, debugId: browserDebugId})
   });
   const contentType = response.headers.get("content-type") || "";
   let data;
@@ -542,9 +574,14 @@ async function api(path, payload) {
     const error = new Error(data.error || "Request failed.");
     error.requestId = data.requestId;
     error.details = data;
-    if (path !== "/api/login" && isSessionExpiredError(error)) {
+    if (allowReauth && !["/api/login", "/api/scan-progress", "/api/logout"].includes(path) && isSessionExpiredError(error)) {
+      if (path === "/api/scan") await collectLiveDebug().catch(() => {});
       await promptForReauthentication(error);
-      return api(path, { ...payload, sessionId });
+      if (path === "/api/scan") {
+        error.message = `Scan stopped: ${error.message} Reconnected with a new session. The interrupted scan cannot resume; its debug log is preserved. Start a new scan when ready.`;
+        throw error;
+      }
+      return api(path, { ...payload, sessionId }, false);
     }
     throw error;
   }
@@ -564,9 +601,7 @@ function isSessionExpiredError(error) {
     message.includes("session expired") ||
     message.includes("session may be expired") ||
     message.includes("invalid session") ||
-    message.includes("sid") ||
-    statusCode === 401 ||
-    statusCode === 403
+    statusCode === 401
   );
 }
 
@@ -1219,20 +1254,17 @@ function renderCommandTrace(commandLog = [], commandResults = {}) {
   }).join("");
 }
 
-function downloadDebugLog() {
-  if (!hardeningScan) {
+async function downloadDebugLog() {
+  await collectLiveDebug().catch(() => {});
+  if (!liveScanDebug && !hardeningScan) {
     addNotice("Run a scan before downloading a debug log.", "error");
     return;
   }
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    scannedAt: hardeningScan.scannedAt,
-    user: hardeningScan.user || undefined,
-    baseUrl: hardeningScan.baseUrl || undefined,
-    summary: hardeningScan.summary || {},
-    commandLog: hardeningScan.commandLog || [],
-    commandResults: hardeningScan.commandResults || {}
-  };
+  const payload = liveScanDebug
+    ? {generatedAt: new Date().toISOString(), ...liveScanDebug}
+    : {generatedAt: new Date().toISOString(), scannedAt: hardeningScan.scannedAt,
+      user: hardeningScan.user, baseUrl: hardeningScan.baseUrl, summary: hardeningScan.summary || {},
+      commandLog: hardeningScan.commandLog || [], commandResults: hardeningScan.commandResults || {}};
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -2532,7 +2564,7 @@ reauthForm.addEventListener("submit", async (event) => {
       "Check Point target": result.baseUrl,
       "Result": "Reauthenticated"
     });
-    addNotice("Session reestablished. Continuing previous action...", "success");
+    addNotice("Reconnected with fresh sessions. Interrupted scan debug logs are preserved.", "success");
     closeReauth();
     if (reauthResolve) {
       reauthResolve(result);
@@ -2557,16 +2589,20 @@ cancelScanButton.addEventListener("click", async () => {
 
 scanButton.addEventListener("click", async () => {
   setBusy(true);
+  debugSessionId = sessionId;
+  downloadDebugLogButton.disabled = false;
   setScanInProgress(true);
   startScanProgressPolling();
   try {
     addNotice("Scanning hardening posture...");
     hardeningScan = await api("/api/scan", { sessionId });
     stopScanProgressPolling();
+    await collectLiveDebug().catch(() => {});
     renderChecks();
     addNotice(`Hardening scan completed at ${new Date(hardeningScan.scannedAt).toLocaleString()}.`, "success");
   } catch (error) {
     stopScanProgressPolling();
+    await collectLiveDebug().catch(() => {});
     addNotice(error.message, "error");
     scanStatus.className = "global-status error-state";
     scanStatus.textContent = error.details?.cancelled ? error.message : `Scan failed: ${error.message}`;
@@ -2589,6 +2625,8 @@ logoutButton.addEventListener("click", async () => {
     addNotice(error.message, "error");
   } finally {
     sessionId = "";
+    debugSessionId = "";
+    liveScanDebug = null;
     hardeningScan = null;
     scanButton.textContent = "Scan Hardening Posture";
     openCheckGroups.clear();

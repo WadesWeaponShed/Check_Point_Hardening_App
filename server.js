@@ -12,6 +12,7 @@ import { collectPages, scopedCommandKey, collectionOutcome } from "./lib/collect
 import { pollScriptTasks } from "./lib/task-polling.js";
 import { operationContext, beginOperation, finishOperation, assertNotCancelled, trackRequest } from "./lib/operations.js";
 import { checkOwnerScope, withFindingIdentity } from "./public/finding-model.js";
+import {createScanDebug, appendScanDebug, scanDebugSnapshot, removeScanDebug} from "./lib/scan-debug.js";
 const STANDARD_API_CONCURRENCY = positiveIntegerEnv("API_CONCURRENCY", 10);
 
 const PORT = Number(process.env.PORT || 3000);
@@ -28,6 +29,7 @@ const LARGE_ENV_TASK_POLL_INTERVAL_MS = positiveIntegerEnv("LARGE_ENV_TASK_POLL_
 const TASK_POLL_TIMEOUT_MS = positiveIntegerEnv("TASK_POLL_TIMEOUT_MS", 180_000);
 const TASK_POLL_INTERVAL_MS = positiveIntegerEnv("TASK_POLL_INTERVAL_MS", 1000);
 const TASK_POLL_MAX_INTERVAL_MS = positiveIntegerEnv("TASK_POLL_MAX_INTERVAL_MS", 4000);
+const CP_SESSION_TIMEOUT_SECONDS = positiveIntegerEnv("CP_SESSION_TIMEOUT_SECONDS", 3600);
 const CP_API_TIMEOUT_MS = positiveIntegerEnv("CP_API_TIMEOUT_MS", 45_000);
 const CP_SIC_TEST_TIMEOUT_MS = positiveIntegerEnv("CP_SIC_TEST_TIMEOUT_MS", 120_000);
 const SIC_TEST_CONCURRENCY = positiveIntegerEnv("SIC_TEST_CONCURRENCY", 8);
@@ -93,6 +95,8 @@ const SCAN_CACHEABLE_COMMANDS = new Set([
   "show-software-packages-per-targets",
   "where-used"
 ]);
+
+const browserDebugJournals = new Map();
 
 function log(message, details = {}) {
   const parts = Object.entries(details)
@@ -414,7 +418,29 @@ function recordScanCommand(session, entry) {
 function cpRequest(session, command, body = {}) {
   const operation = operationContext.getStore()?.operation;
   return trackRequest(operation, () => {
-    const execute = () => { assertNotCancelled(operation); return cpRequestUnqueued(session, command, body); };
+    const execute = async () => {
+      assertNotCancelled(operation);
+      const journal = operationContext.getStore()?.debugJournal;
+      const requestId = randomUUID();
+      const root = operationContext.getStore()?.debugRoot;
+      const domain = body.domain || (session.sid && session.sid === root?.systemDataSid ? "System Data"
+        : session.sid && session.sid === root?.globalDomainSid ? "Global"
+        : session.sid && session.sid === root?.mdsSid ? "MDS" : session.domain || "MDS");
+      const startedAt = Date.now();
+      appendScanDebug(journal, {requestId, domain, command, status: "started",
+        requestedSessionTimeout: command === "login" ? CP_SESSION_TIMEOUT_SECONDS : undefined,
+        target: cpApiUrl(session, command).toString()});
+      try {
+        const result = await cpRequestUnqueued(session, command, body);
+        appendScanDebug(journal, {requestId, domain, command, status: "ok", durationMs: Date.now() - startedAt,
+          sessionTimeout: result["session-timeout"]});
+        return result;
+      } catch (error) {
+        appendScanDebug(journal, {requestId, domain, command, status: "failed", durationMs: Date.now() - startedAt,
+          error: error.message, phase: error.phase, statusCode: error.statusCode, response: error.response});
+        throw error;
+      }
+    };
     if (command === "show-logs") return showLogsQueue(execute);
     if (session?.scanApiQueue && command !== "login") return session.scanApiQueue(execute);
     return execute();
@@ -422,6 +448,7 @@ function cpRequest(session, command, body = {}) {
 }
 
 function cpRequestUnqueued(session, command, body = {}) {
+  if (command === "login") body = { ...body, "session-timeout": CP_SESSION_TIMEOUT_SECONDS };
   return new Promise((resolve, reject) => {
     const url = cpApiUrl(session, command);
     const transport = url.protocol === "http:" ? httpRequest : httpsRequest;
@@ -510,6 +537,13 @@ function cpRequestUnqueued(session, command, body = {}) {
         }
         if (CP_API_LOGGING) {
           log("Check Point API request completed", { command, status: apiRes.statusCode });
+        }
+        if (command === "login") {
+          log("Check Point session established", {
+            domain: body.domain || "MDS/default",
+            requestedTimeoutSeconds: CP_SESSION_TIMEOUT_SECONDS,
+            returnedTimeoutSeconds: parsed["session-timeout"]
+          });
         }
         recordScanCommand(session, {
           command,
@@ -787,8 +821,7 @@ function isExpiredSessionError(error) {
     message.includes("session expired") ||
     message.includes("invalid session") ||
     (message.includes("session id") && message.includes("expired")) ||
-    statusCode === 401 ||
-    statusCode === 403
+    statusCode === 401
   );
 }
 
@@ -8136,11 +8169,12 @@ async function scanMoraHardening(session) {
         const sid = domain.session.sid;
         try {
           // Cleanup must still run when the scan operation was cancelled.
-          await operationContext.run(undefined, () => cpRequest({
+          await operationContext.run({debugJournal: operationContext.getStore()?.debugJournal, debugRoot: session}, () => cpRequest({
             baseUrl: session.baseUrl,
             smart1Cloud: session.smart1Cloud,
             rejectUnauthorized: session.rejectUnauthorized,
-            sid
+            sid,
+            domain: domain.name
           }, "logout", {}));
         } catch (error) {
           log("Domain logout request failed", { domain: domain.name, error: error.message });
@@ -10219,6 +10253,8 @@ async function handleApiRequest(req, res) {
       return;
     }
     payload = await readBody(req);
+    const debugId = String(payload.debugId || "");
+    operationContext.getStore().debugRoot = sessions.get(payload.sessionId);
     if (req.url === "/api/cancel-scan" && req.method === "POST") {
       const session = getSession(payload.sessionId);
       if (session.activeOperation?.kind === "scan") {
@@ -10243,6 +10279,14 @@ async function handleApiRequest(req, res) {
     if (req.url === "/api/login" && req.method === "POST") {
       log("Local API request", { requestId, route: "/api/login" });
       sendJson(res, 200, { requestId, ...(await login(payload)) });
+      return;
+    }
+    if (req.url === "/api/scan-debug" && req.method === "POST") {
+      const session = sessions.get(payload.sessionId);
+      const journal = browserDebugJournals.get(debugId) || session?.scanDebug;
+
+      const offset = Number.isSafeInteger(payload.offset) && payload.offset >= 0 ? payload.offset : 0;
+      sendJson(res, 200, {requestId, ok: true, debug: scanDebugSnapshot(journal, offset), progress: session?.scanProgress});
       return;
     }
     if (req.url === "/api/scan-progress" && req.method === "POST") {
@@ -10283,11 +10327,19 @@ async function handleApiRequest(req, res) {
     if (req.url === "/api/scan" && req.method === "POST") {
       log("Local API request", { requestId, route: "/api/scan" });
       const session = getSession(payload.sessionId);
+      session.scanDebug = browserDebugJournals.get(debugId) || session.scanDebug || createScanDebug({baseUrl: session.baseUrl, user: session.user});
+      if (/^[0-9a-f-]{36}$/i.test(debugId)) browserDebugJournals.set(debugId, session.scanDebug);
+      log("Scan debug journal started", {scanId: session.scanDebug.scanId, file: session.scanDebug.file, writeError: session.scanDebug.writeError});
+      operationContext.getStore().debugJournal = session.scanDebug;
+      operationContext.getStore().debugRoot = session;
+      appendScanDebug(session.scanDebug, {command: "scan", status: "started", mode: session.moraMode ? "all-domains" : "single-domain"});
       try {
         const result = session.moraMode ? await scanMoraHardening(session) : await scanHardening(session);
         assertNotCancelled(operation);
+        appendScanDebug(session.scanDebug, {command: "scan", status: "ok"});
         sendJson(res, 200, { requestId, ...result });
       } catch (error) {
+        appendScanDebug(session.scanDebug, {command: "scan", status: error.code === "SCAN_CANCELLED" ? "cancelled" : "failed", error: error.message});
         if (session.scanProgress) {
           session.scanProgress = {
             ...session.scanProgress,
@@ -10651,6 +10703,8 @@ async function handleApiRequest(req, res) {
       contentType: error.contentType,
       bodyPreview: error.bodyPreview
     });
+    appendScanDebug(operationContext.getStore()?.debugJournal, {requestId, command: req.url, status: "failed",
+      error: error.message, phase: error.phase, statusCode: error.statusCode});
     sendJson(res, error.httpStatus || 400, {
       requestId,
       error: error.message,
@@ -10671,6 +10725,15 @@ async function handleApiRequest(req, res) {
       operationSession.scanApiQueue = null;
       operationSession.moraGlobalCommandCache = null;
       operationSession.moraAdminSourceGlobalInventory = null;
+      if (req.url === "/api/logout") {
+        const journal = browserDebugJournals.get(String(payload.debugId || "")) || operationSession.scanDebug;
+        removeScanDebug(journal);
+        browserDebugJournals.delete(String(payload.debugId || ""));
+        for (const oldSession of sessions.values()) {
+          if (oldSession.scanDebug === journal) oldSession.scanDebug = null;
+        }
+        if (journal) { journal.commandLog.length = 0; journal.file = null; }
+      }
     }
   }
 }
