@@ -13,6 +13,7 @@ import { pollScriptTasks } from "./lib/task-polling.js";
 import { operationContext, beginOperation, finishOperation, assertNotCancelled, trackRequest } from "./lib/operations.js";
 import { checkOwnerScope, withFindingIdentity } from "./public/finding-model.js";
 import {createScanDebug, appendScanDebug, scanDebugSnapshot, removeScanDebug} from "./lib/scan-debug.js";
+import {recoverRead, currentSid} from "./lib/session-recovery.js";
 const STANDARD_API_CONCURRENCY = positiveIntegerEnv("API_CONCURRENCY", 10);
 
 const PORT = Number(process.env.PORT || 3000);
@@ -60,7 +61,9 @@ function positiveIntegerEnv(name, fallback) {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-function createLimiter(limit) {
+function createLimiter(limit, {adaptive = false, onChange = () => {}} = {}) {
+  const ceiling = limit;
+  let successes = 0;
   let active = 0;
   const queue = [];
 
@@ -77,10 +80,19 @@ function createLimiter(limit) {
       });
   }
 
-  return (fn) => new Promise((resolve, reject) => {
+  const schedule = (fn) => new Promise((resolve, reject) => {
     queue.push({ fn, resolve, reject });
     runNext();
   });
+  schedule.observe = error => {
+    if (!adaptive) return;
+    const previous = limit;
+    if (error && (error.phase === "timeout" || [429,503].includes(error.statusCode))) {
+      limit = Math.max(1, Math.floor(limit / 2));successes = 0;
+    } else if (!error && ++successes >= 30 && limit < ceiling) {limit++;successes = 0;}
+    if (limit !== previous) {onChange({previous,current:limit});runNext();}
+  };
+  return schedule;
 }
 
 const runScriptQueue = createLimiter(RUN_SCRIPT_CONCURRENCY);
@@ -424,19 +436,47 @@ function cpRequest(session, command, body = {}) {
       const journal = operationContext.getStore()?.debugJournal;
       const requestId = randomUUID();
       const root = operationContext.getStore()?.debugRoot;
-      const domain = body.domain || (session.sid && session.sid === root?.systemDataSid ? "System Data"
-        : session.sid && session.sid === root?.globalDomainSid ? "Global"
-        : session.sid && session.sid === root?.mdsSid ? "MDS" : session.domain || "MDS");
+      const resolvedSid = currentSid(root, session.sid);
+      const domain = body.domain || (resolvedSid && resolvedSid === root?.systemDataSid ? "System Data"
+        : resolvedSid && resolvedSid === root?.globalDomainSid ? "Global"
+        : resolvedSid && resolvedSid === root?.mdsSid ? "MDS" : session.domain || "MDS");
       const startedAt = Date.now();
       appendScanDebug(journal, {requestId, domain, command, status: "started",
         requestedSessionTimeout: command === "login" ? CP_SESSION_TIMEOUT_SECONDS : undefined,
         target: cpApiUrl(session, command).toString()});
       try {
-        const result = await cpRequestUnqueued(session, command, body);
+        const result = await recoverRead({root, session, command, body,
+          request: cpRequestUnqueued, expired: isExpiredSessionError,
+          checkCancelled: () => {assertNotCancelled(operation); assertNotCancelled(session.scanRequestScope);},
+          renew: async (expiredSid, cause) => {
+            const loginDomain = domain === "MDS" ? undefined : domain;
+            root.renewalTimes ||= new Map();
+            const times = root.renewalTimes.get(domain) || [];
+            while (times.filter(t => Date.now() - t < 60_000).length >= 2) {
+              assertNotCancelled(operation);
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            times.push(Date.now());root.renewalTimes.set(domain, times.filter(t => Date.now() - t < 60_000));
+            appendScanDebug(journal,{domain,command:"session-renewal",status:"started",failedCommand:command,error:cause?.message,statusCode:cause?.statusCode});
+            try {
+              const login = await cpRequestUnqueued({baseUrl:root.baseUrl,smart1Cloud:root.smart1Cloud,rejectUnauthorized:root.rejectUnauthorized},"login",{...root.scanAuth,domain:loginDomain});
+              if (!login.sid) throw new Error("Session renewal did not return a SID.");
+              for (const key of ["sid","mdsSid","globalDomainSid","systemDataSid"]) {
+                if (root[key] === expiredSid) root[key] = login.sid;
+              }
+              appendScanDebug(journal,{domain,command:"session-renewal",status:"ok",sessionTimeout:login["session-timeout"]});
+              return login.sid;
+            } catch (error) {
+              appendScanDebug(journal,{domain,command:"session-renewal",status:"failed",error:error.message});throw error;
+            }
+          }
+        });
+        session.scanApiQueue?.observe?.();
         appendScanDebug(journal, {requestId, domain, command, status: "ok", durationMs: Date.now() - startedAt,
           sessionTimeout: result["session-timeout"]});
         return result;
       } catch (error) {
+        session.scanApiQueue?.observe?.(error);
         appendScanDebug(journal, {requestId, domain, command, status: "failed", durationMs: Date.now() - startedAt,
           error: error.message, phase: error.phase, statusCode: error.statusCode, response: error.response});
         throw error;
@@ -767,6 +807,7 @@ async function login(payload) {
     moraMode,
     customerName: session.customerName,
     managementObjectName: session.managementObjectName,
+    scanAuth: { ...loginBody, domain: undefined },
     moraAuth: moraMode ? { ...loginBody, domain: undefined } : null,
     createdAt: Date.now(),
     lastHardeningScan: null
@@ -852,6 +893,12 @@ async function tryCommand(session, command, body = {}) {
   })();
   if (cacheable) {
     cache.set(cacheKey, lookup);
+    // A failed/cancelled shared lookup must not poison the next CMA's collection.
+    lookup.then(result => {
+      if (!result.ok && cache.get(cacheKey) === lookup) cache.delete(cacheKey);
+    }, () => {
+      if (cache.get(cacheKey) === lookup) cache.delete(cacheKey);
+    });
   }
   return lookup;
 }
@@ -7777,7 +7824,9 @@ async function scanHardening(session) {
   session.adminLastLoginCache = new Map();
   session.scanCommandCache = new Map();
   session.scanCommandLog = [];
-  session.scanApiQueue = createLimiter(session.largeEnvironmentMode ? LARGE_ENV_API_CONCURRENCY : STANDARD_API_CONCURRENCY);
+  session.scanApiQueue = createLimiter(session.largeEnvironmentMode ? LARGE_ENV_API_CONCURRENCY : STANDARD_API_CONCURRENCY, {
+    adaptive:true,onChange:change => appendScanDebug(operationContext.getStore()?.debugJournal,{command:"api-concurrency",domain:session.domain,status:"adjusted",...change})
+  });
   session.scanProgress = {
     active: true,
     failed: false,
@@ -8176,7 +8225,7 @@ async function scanMoraHardening(session) {
         domain.session.scanRequestScope.cancelled = true;
         const pending = operationContext.getStore()?.operation?.pending;
         while (pending?.size) await Promise.allSettled([...pending]);
-        const sid = domain.session.sid;
+        const sid = currentSid(session, domain.session.sid);
         try {
           // Cleanup must still run when the scan operation was cancelled.
           await operationContext.run({debugJournal: operationContext.getStore()?.debugJournal, debugRoot: session}, () => cpRequest({
@@ -8193,6 +8242,19 @@ async function scanMoraHardening(session) {
         }
       }
     }
+    session.lastHardeningScan = {
+      moraMode:true, partial:true, totalDomains:domains.length, scannedAt:new Date().toISOString(), user:session.user,
+      baseUrl:session.baseUrl, customerName:session.customerName,
+      guide:domainResults.find(d => d.scan)?.scan?.guide,
+      summary:mergeScanSummaries(domainResults), domains:[...domainResults], checks:[],
+      commandLog:domainResults.flatMap(d => (d.scan?.commandLog || []).map(e => ({...e,domain:d.name}))),
+      commandResults:{}
+    };
+    if (session.scanDebug?.file) {
+      try {await writeFile(join(session.scanDebug.file,"..","checkpoint.json"), JSON.stringify(session.lastHardeningScan), {mode:0o600});}
+      catch (error) {appendScanDebug(session.scanDebug,{command:"checkpoint",status:"failed",error:error.message});}
+    }
+    appendScanDebug(session.scanDebug,{command:"checkpoint",domain:domain.name,status:"ok",completedDomains:domainResults.length});
     session.scanProgress.percent = Math.round(((index + 1) / domains.length) * 100);
   }
   const successful = domainResults.filter((domain) => domain.scan);
@@ -10125,7 +10187,7 @@ async function logout(sessionId) {
       session.mdsSid,
       session.globalDomainSid,
       ...(session.moraDomains || []).map((domain) => domain.session?.sid)
-    ]);
+    ].filter(Boolean).map(sid => currentSid(session, sid)));
     const logoutTargets = sessionIds.map((sid) => ({
         baseUrl: session.baseUrl,
         rejectUnauthorized: session.rejectUnauthorized,
@@ -10142,6 +10204,8 @@ async function logout(sessionId) {
       }
     }
   } finally {
+    session.scanAuth = null;
+    session.moraAuth = null;
     sessions.delete(sessionId);
   }
 }
@@ -10276,7 +10340,7 @@ async function handleApiRequest(req, res) {
       return;
     }
     const isOperation = req.method === "POST" && (
-      ["/api/scan", "/api/check", "/api/logout"].includes(req.url) || req.url.startsWith("/api/remediate/")
+      ["/api/check", "/api/logout"].includes(req.url) || req.url.startsWith("/api/remediate/")
     );
     if (isOperation) {
       operationSession = getSession(payload.sessionId);
@@ -10335,38 +10399,48 @@ async function handleApiRequest(req, res) {
       });
       return;
     }
-    if (req.url === "/api/scan" && req.method === "POST") {
-      log("Local API request", { requestId, route: "/api/scan" });
+    if (req.url === "/api/scan-checkpoint" && req.method === "POST") {
       const session = getSession(payload.sessionId);
-      session.scanDebug = browserDebugJournals.get(debugId) || session.scanDebug || createScanDebug({baseUrl: session.baseUrl, user: session.user});
-      if (/^[0-9a-f-]{36}$/i.test(debugId)) browserDebugJournals.set(debugId, session.scanDebug);
-      log("Scan debug journal started", {scanId: session.scanDebug.scanId, file: session.scanDebug.file, writeError: session.scanDebug.writeError});
-      operationContext.getStore().debugJournal = session.scanDebug;
-      operationContext.getStore().debugRoot = session;
-      appendScanDebug(session.scanDebug, {command: "scan", status: "started", mode: session.moraMode ? "all-domains" : "single-domain"});
-      try {
-        const result = session.moraMode ? await scanMoraHardening(session) : await scanHardening(session);
-        assertNotCancelled(operation);
-        appendScanDebug(session.scanDebug, {command: "scan", status: "ok"});
-        sendJson(res, 200, { requestId, ...result });
-      } catch (error) {
-        appendScanDebug(session.scanDebug, {command: "scan", status: error.code === "SCAN_CANCELLED" ? "cancelled" : "failed", error: error.message});
-        if (session.scanProgress) {
-          session.scanProgress = {
-            ...session.scanProgress,
-            active: false,
-            complete: false,
-            failed: error.code !== "SCAN_CANCELLED",
-            cancelled: error.code === "SCAN_CANCELLED",
-            percent: Math.max(session.scanProgress.percent || 0, 8),
-            currentStep: error.message || "Scan failed",
-            completedAt: new Date().toISOString()
-          };
+      sendJson(res,200,{requestId,result:session.lastHardeningScan});return;
+    }
+    if (req.url === "/api/scan-status" && req.method === "POST") {
+      const session = getSession(payload.sessionId);
+      const job = session.scanJob;
+      if (!job || job.id !== payload.scanId) throw Object.assign(new Error("Scan job not found."),{httpStatus:404});
+      sendJson(res,200,{requestId,scanId:job.id,state:job.state,failure:job.error,progress:session.scanProgress,
+        result: job.state !== "running" || payload.completedDomains !== (session.lastHardeningScan?.domains?.length || 0) ? session.lastHardeningScan : undefined,
+        completedDomains:session.lastHardeningScan?.domains?.length || 0});
+      return;
+    }
+    if (req.url === "/api/scan" && req.method === "POST") {
+      const session = getSession(payload.sessionId);
+      const scanOperation = beginOperation(session,"scan");
+      session.scanDebug = browserDebugJournals.get(debugId) || session.scanDebug || createScanDebug({baseUrl:session.baseUrl,user:session.user});
+      if (/^[0-9a-f-]{36}$/i.test(debugId)) browserDebugJournals.set(debugId,session.scanDebug);
+      session.lastHardeningScan = null;
+      const job = {id:randomUUID(),state:"running",error:null};
+      session.scanJob = job;
+      log("Scan debug journal started",{scanId:job.id,file:session.scanDebug.file});
+      const context = {operation:scanOperation,debugJournal:session.scanDebug,debugRoot:session};
+      void operationContext.run(context,async () => {
+        appendScanDebug(session.scanDebug,{command:"scan",status:"started",scanId:job.id});
+        let state = "complete";
+        try {
+          session.lastHardeningScan = session.moraMode ? await scanMoraHardening(session) : await scanHardening(session);
+          assertNotCancelled(scanOperation);
+        } catch (error) {
+          state = error.code === "SCAN_CANCELLED" ? "cancelled" : "failed";
+          job.error = {message:error.message,command:error.command,phase:error.phase,statusCode:error.statusCode};
+          session.scanProgress = {...session.scanProgress,active:false,complete:false,failed:state === "failed",cancelled:state === "cancelled",currentStep:error.message};
+        } finally {
+          await finishOperation(session,scanOperation);
+          session.scanCommandCache = null;session.scanApiQueue = null;
+          session.moraGlobalCommandCache = null;session.moraSystemDataCommandCache = null;
+          appendScanDebug(session.scanDebug,{command:"scan",status:state,error:job.error?.message});
+          job.state = state;
         }
-        session.scanCommandCache = null;
-        session.scanApiQueue = null;
-        throw error;
-      }
+      }).catch(error => {job.state="failed";job.error={message:error.message};log("Scan job failed",{error:error.message});});
+      sendJson(res,202,{requestId,scanId:job.id,state:"running"});
       return;
     }
     if (req.url === "/api/check" && req.method === "POST") {

@@ -113,13 +113,28 @@ async function collectLiveDebug() {
   return debugFetchPending;
 }
 
+const checkpointDownloadButton = document.createElement("button");
+checkpointDownloadButton.id = "downloadCheckpointButton";
+checkpointDownloadButton.type = "button";
+checkpointDownloadButton.textContent = "Download completed CMA results";
+downloadDebugLogButton.after(checkpointDownloadButton);
+checkpointDownloadButton.addEventListener("click", async () => {
+  try {
+    const data = await api("/api/scan-checkpoint", {sessionId}, false);
+    if (!data.result) {addNotice("No completed CMA results are available yet.");return;}
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data.result,null,2)],{type:"application/json"}));
+    const link = document.createElement("a");link.href=url;link.download="check-point-completed-cmas.json";
+    document.body.append(link);link.click();link.remove();URL.revokeObjectURL(url);
+  } catch (error) {addNotice(error.message,"error");}
+});
+
 function setBusy(isBusy) {
   // The workbench holds inactive cards off-document. Lock its entire subtree,
   // including filters, so an operation cannot mount a different action card.
   checksList.inert = isBusy;
   checksList.setAttribute("aria-busy", String(isBusy));
   document.querySelectorAll("button").forEach((button) => {
-    if (button.id !== "downloadDebugLogButton" && !button.closest("#reauthOverlay")) {
+    if (!["downloadDebugLogButton", "downloadCheckpointButton"].includes(button.id) && !button.closest("#reauthOverlay")) {
       button.disabled = isBusy;
     }
   });
@@ -1633,7 +1648,8 @@ function renderChecks() {
     <dl>${renderDetails({
       ...(hardeningScan.moraMode ? {
         "Domains scanned": moraDomains.filter((domain) => domain.scan).length,
-        "Domains failed": moraDomains.filter((domain) => !domain.scan).length
+        "Domains failed": moraDomains.filter((domain) => !domain.scan).length,
+        ...(hardeningScan.partial ? {"Domains pending": Math.max(0, (hardeningScan.totalDomains || moraDomains.length) - moraDomains.length)} : {})
       } : {}),
       "Scanned": scanned,
       ...(!hardeningScan.moraMode && lastScan?.scannedAt ? { "Previous scan": lastScanText } : {})
@@ -1643,7 +1659,7 @@ function renderChecks() {
 
   checksList.innerHTML = hardeningScan.moraMode
     ? moraDomains.map((domain, index) => `
-      <details class="mora-domain-group" data-domain-name="${escapeHtml(domain.name)}" ${openMoraDomains.has(domain.name) || index === 0 ? "open" : ""}>
+      <details class="mora-domain-group" data-domain-name="${escapeHtml(domain.name)}" data-domain-uid="${escapeHtml(domain.uid || domain.name)}" ${openMoraDomains.has(domain.name) || index === 0 ? "open" : ""}>
         <summary class="mora-domain-summary">
           ${escapeHtml(domain.name)}
           <span>${domain.scan ? `${domain.scan.checks?.length || 0} checks` : "Scan failed"}</span>
@@ -2593,9 +2609,26 @@ scanButton.addEventListener("click", async () => {
   downloadDebugLogButton.disabled = false;
   setScanInProgress(true);
   startScanProgressPolling();
+  const jobSessionId = sessionId;
+  let completedDomains = 0;
+  hardeningScan = null;
   try {
     addNotice("Scanning hardening posture...");
-    hardeningScan = await api("/api/scan", { sessionId });
+    const job = await api("/api/scan", {sessionId:jobSessionId}, false);
+    let status;
+    do {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      status = await api("/api/scan-status", {sessionId:jobSessionId,scanId:job.scanId,completedDomains}, false);
+      if (status.result) hardeningScan = status.result;
+      completedDomains = status.completedDomains || 0;
+      renderScanProgress(status.progress || {});
+    } while (status.state === "running");
+    hardeningScan = status.result || hardeningScan;
+    if (status.state !== "complete") {
+      if (hardeningScan) renderChecks();
+      const error = new Error(status.failure?.message || `Scan ${status.state}.`);
+      error.details = {cancelled:status.state === "cancelled"};throw error;
+    }
     stopScanProgressPolling();
     await collectLiveDebug().catch(() => {});
     renderChecks();
@@ -2603,9 +2636,18 @@ scanButton.addEventListener("click", async () => {
   } catch (error) {
     stopScanProgressPolling();
     await collectLiveDebug().catch(() => {});
+    // Recover the latest checkpoint even if status polling or the final response failed.
+    try {
+      const checkpoint = await api("/api/scan-checkpoint", {sessionId:jobSessionId}, false);
+      if (checkpoint.result) hardeningScan = checkpoint.result;
+    } catch { /* Keep the last checkpoint already received by this browser. */ }
     addNotice(error.message, "error");
-    scanStatus.className = "global-status error-state";
-    scanStatus.textContent = error.details?.cancelled ? error.message : `Scan failed: ${error.message}`;
+    if (hardeningScan) renderChecks();
+    scanStatus.classList.add("error-state");
+    const failure = document.createElement("p");
+    failure.setAttribute("role", "status");
+    failure.textContent = `${error.details?.cancelled ? "Scan cancelled" : "Scan interrupted"}: ${error.message}${hardeningScan ? " Completed CMA results remain available below." : ""}`;
+    scanStatus.append(failure);
   } finally {
     setScanInProgress(false);
     setBusy(false);

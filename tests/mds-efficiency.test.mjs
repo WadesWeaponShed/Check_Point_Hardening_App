@@ -1,3 +1,4 @@
+import {currentSid} from "../lib/session-recovery.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -6,7 +7,7 @@ import {scopedCommandKey} from '../lib/collection.js';
 const source=readFileSync(new URL('../server.js',import.meta.url),'utf8');
 test('System Data reads share a scan cache and queue while CMA data stays scoped',async()=>{
  let requests=0;
- const ctx=vm.createContext({assertNotCancelled(){},operationContext:{getStore(){}},SCAN_CACHEABLE_COMMANDS:new Set(),
+ const ctx=vm.createContext({currentSid,appendScanDebug(){},assertNotCancelled(){},operationContext:{getStore(){}},SCAN_CACHEABLE_COMMANDS:new Set(),
  scopedCommandKey,stableJson:JSON.stringify,isExpiredSessionError:()=>false,commandError:e=>({error:e.message}),
  cpRequest:async()=>{requests++;return {value:1};}});
  vm.runInContext(source.slice(source.indexOf('async function tryCommand('),source.indexOf('async function listObjects('))+
@@ -21,7 +22,7 @@ test('System Data reads share a scan cache and queue while CMA data stays scoped
 });
 test('failed CMA drains in-flight requests before logout or next login',async()=>{
  const events=[];const operation={pending:new Set()};
- const ctx=vm.createContext({Date,Map,Math,Object,Array,Number,HARDENING_GUIDE_URL:'guide',mergeScanSummaries:()=>({}),
+ const ctx=vm.createContext({currentSid,appendScanDebug(){},Date,Map,Math,Object,Array,Number,HARDENING_GUIDE_URL:'guide',mergeScanSummaries:()=>({}),
  assertNotCancelled(){},log(){},operationContext:{getStore:()=>({operation}),run:(_,fn)=>fn()},
  cpRequest:async(target,command,body)=>{events.push(`${command}:${body.domain||target.sid}`);return command==='login'?{sid:body.domain}:{};},
  scanHardening:async target=>{

@@ -137,7 +137,7 @@ export function mountWorkbench(host, { view = "hierarchy", sessionKey = "", view
   }
   const domainNodes = [...host.querySelectorAll(".mora-domain-group")];
   const domains = domainNodes.length ? domainNodes.map((node, index) => ({
-    key: `${index}:${node.dataset.domainName}`, title: node.dataset.domainName,
+    key: node.dataset.domainUid || node.dataset.domainName, title: node.dataset.domainName,
     scopes: scopesFrom(node, view), error: node.querySelector(".mora-domain-error")?.textContent
   })) : [{ key: "single", title: "Current environment", scopes: scopesFrom(host, view) }];
   // Hold the original nodes (and listeners) before replacing their wrappers.
@@ -166,7 +166,7 @@ export function mountWorkbench(host, { view = "hierarchy", sessionKey = "", view
   const count = element("p", "wb-count"); count.setAttribute("role", "status");
   if (viewSwitch) nav.append(viewSwitch);
   else nav.append(element("h2", "wb-nav-title", view === "hierarchy" ? "Infrastructure" : "Categories"));
-  let domain = domains.find((item) => item.key === saved.domain) || domains[0];
+  let domain = domains.find((item) => item.key === saved.domain) || domains.find(item => !item.error) || domains[0];
   let entries = [];
   let selectedIndex = -1;
   const toolbar = element('div', 'wb-evidence-toolbar');

@@ -1,3 +1,4 @@
+import {currentSid} from "../lib/session-recovery.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -10,7 +11,7 @@ function fixture(failure) {
   const events = [];
   const session = {id: 'root', baseUrl: 'https://mds', moraAuth: {user: 'scanner', password: 'secret'},
     moraDomains: ['A', 'B'].map(name => ({name, uid: name, session: null}))};
-  const context = vm.createContext({Date, Map, Math, Object, Array, Number,
+  const context = vm.createContext({currentSid,appendScanDebug(){},Date, Map, Math, Object, Array, Number,
     assertNotCancelled() {}, operationContext: {getStore() {}, run: (_, fn) => fn()},
     log() {}, HARDENING_GUIDE_URL: 'guide', mergeScanSummaries: () => ({}),
     cpRequest: async (target, command, body) => {

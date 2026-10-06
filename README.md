@@ -155,3 +155,36 @@ of the per-request timeouts, which use milliseconds. The server's login response
 determines the granted idle lifetime; the console records requested and returned
 values, and scan debug records include login timeout information. Existing sessions
 require a new login for this setting to apply.
+
+### Resilient full MDS scans
+
+`POST /api/scan` starts a background job and returns HTTP 202 with `scanId`.
+`POST /api/scan-status` takes the app `sessionId` and that `scanId`, returning
+running/completed/failed/cancelled state and the final or partial report when done.
+The app polls this endpoint, avoiding one long proxy request. Jobs remain local to
+the running process; they do not automatically resume after a process restart.
+
+Each CMA is logged in just before scanning. Completed CMA reports are checkpointed
+in `checkpoint.json` next to the scan journal, and can be downloaded during a scan
+using Download completed CMA results. Both files are removed on explicit app logout.
+Shared System Data reads are cached across CMAs within each full scan.
+
+Expired read requests (`show-*` and `where-used`) renew only their affected session,
+coalesce concurrent renewals, and retry once while keeping earlier work. Script
+submissions and mutations are never automatically replayed. Renewal credentials stay
+in server memory until logout; debug exports redact credentials and SIDs. Automatic
+renewal allows at most two renewal attempts per session context per minute within an
+app session. It is not a rate limiter across separate app instances or admin clients.
+
+API concurrency starts at the configured limit and backs off on request timeouts,
+HTTP 429, or HTTP 503. It slowly recovers after successful requests, never exceeding
+the configured limit. Debug downloads include the slowest commands, per-domain
+request counts and durations, concurrency adjustments, and session renewal details.
+Durations are summed request time, not wall-clock scan duration.
+
+Completed CMA reports remain visible in the Infrastructure/Categories review layout
+even when other CMAs fail, the job is cancelled, or a status response is lost. The
+domain selector defaults to a successful CMA and marks failed ones. Interrupted
+reports preserve scanned/failed counts and show domains still pending. Browser
+regression verification: `node scripts/check_completed_cma_ui.mjs` against the local
+app (or set `APP_URL`); this uses installed Chrome and mocked API responses.
