@@ -420,6 +420,7 @@ function cpRequest(session, command, body = {}) {
   return trackRequest(operation, () => {
     const execute = async () => {
       assertNotCancelled(operation);
+      assertNotCancelled(session.scanRequestScope);
       const journal = operationContext.getStore()?.debugJournal;
       const requestId = randomUUID();
       const root = operationContext.getStore()?.debugRoot;
@@ -834,7 +835,7 @@ async function tryCommand(session, command, body = {}) {
     ) };
   }
   const cache = session.scanCommandCache;
-  const cacheable = cache && SCAN_CACHEABLE_COMMANDS.has(command);
+  const cacheable = cache && (SCAN_CACHEABLE_COMMANDS.has(command) || (session.cacheSystemDataReads && command.startsWith("show-")));
   const cacheKey = cacheable ? scopedCommandKey(session, command, body, stableJson) : "";
   if (cacheable && cache.has(cacheKey)) {
     return cache.get(cacheKey);
@@ -869,6 +870,17 @@ async function tryListObjects(session, command, body = {}) {
   return { ...result, command, objects: result.data.objects || [] };
 }
 
+function systemDataReadSession(session) {
+  const root = session.moraRootSession;
+  return {
+    ...session,
+    sid: session.systemDataSid,
+    domain: "System Data",
+    scanCommandCache: root?.moraSystemDataCommandCache || session.scanCommandCache,
+    cacheSystemDataReads: true
+  };
+}
+
 async function tryListSystemDataObjects(session, command, body = {}) {
   if (!session.systemDataSid) {
     return {
@@ -886,11 +898,7 @@ async function tryListSystemDataObjects(session, command, body = {}) {
     };
   }
 
-  return tryListObjects({
-    baseUrl: session.baseUrl,
-    rejectUnauthorized: session.rejectUnauthorized,
-    sid: session.systemDataSid
-  }, command, body);
+  return tryListObjects(systemDataReadSession(session), command, body);
 }
 
 async function trySystemDataCommand(session, command, body = {}) {
@@ -909,11 +917,7 @@ async function trySystemDataCommand(session, command, body = {}) {
     };
   }
 
-  return tryCommand({
-    baseUrl: session.baseUrl,
-    rejectUnauthorized: session.rejectUnauthorized,
-    sid: session.systemDataSid
-  }, command, body);
+  return tryCommand(systemDataReadSession(session), command, body);
 }
 
 function uniqueStrings(values) {
@@ -8115,6 +8119,7 @@ async function scanMoraHardening(session) {
   }
   const startedAt = new Date().toISOString();
   session.moraGlobalCommandCache = new Map();
+  session.moraSystemDataCommandCache = new Map();
   session.moraAdminSourceGlobalInventory = null;
   session.scanProgress = {
     active: true,
@@ -8155,6 +8160,7 @@ async function scanMoraHardening(session) {
         domain: domain.name,
         moraAuth: undefined,
         moraRootSession: session,
+        scanRequestScope: {cancelled: false},
         moraDomains: undefined,
         lastHardeningScan: null,
         moraProgress: { parent: session, index, total: domains.length, domainName: domain.name }
@@ -8166,6 +8172,10 @@ async function scanMoraHardening(session) {
       domainResults.push({ name: domain.name, uid: domain.uid, error: error.message || "Domain scan failed.", scan: null });
     } finally {
       if (domain.session) {
+        // Stop sibling collectors after failure and drain requests before closing this CMA.
+        domain.session.scanRequestScope.cancelled = true;
+        const pending = operationContext.getStore()?.operation?.pending;
+        while (pending?.size) await Promise.allSettled([...pending]);
         const sid = domain.session.sid;
         try {
           // Cleanup must still run when the scan operation was cancelled.
@@ -8219,6 +8229,7 @@ async function scanMoraHardening(session) {
     completedAt: new Date().toISOString()
   };
   session.moraGlobalCommandCache = null;
+  session.moraSystemDataCommandCache = null;
   session.moraAdminSourceGlobalInventory = null;
   return result;
 }
@@ -10724,6 +10735,7 @@ async function handleApiRequest(req, res) {
       operationSession.scanCommandCache = null;
       operationSession.scanApiQueue = null;
       operationSession.moraGlobalCommandCache = null;
+      operationSession.moraSystemDataCommandCache = null;
       operationSession.moraAdminSourceGlobalInventory = null;
       if (req.url === "/api/logout") {
         const journal = browserDebugJournals.get(String(payload.debugId || "")) || operationSession.scanDebug;
